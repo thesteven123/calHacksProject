@@ -71,6 +71,13 @@ class DataConfig:
     synthetic_image_size: int = 256
     num_workers: int = 0
     pte: PTEConfig = field(default_factory=PTEConfig)
+    dff_root: str | None = None
+    dff_generators: tuple[str, ...] = ("inpainting", "insight", "text2img")
+    dff_val_fraction: float = 0.2
+    dff_format_align: bool = True
+    sowaiba_root: str | None = None
+    sowaiba_val_fraction: float = 0.2
+    sowaiba_eval: bool = False
 
 
 @dataclass
