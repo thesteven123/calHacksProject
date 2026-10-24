@@ -99,3 +99,43 @@ def test_config_yaml_roundtrip(tmp_path):
     p.write_text("model:\n  feature_layers: [2, 4]\ndata:\n  pte:\n    max_hops: 2\n")
     cfg = Config.from_yaml(p)
     assert cfg.model.feature_layers == (2, 4) and cfg.data.pte.max_hops == 2
+
+
+def test_holdout_matching_no_validation_fakes_fails_fast():
+    from pytest import raises
+
+    with raises(ValueError, match="no fakes"):
+        split_val_holdout(SyntheticDeepfakeDataset(32), ("generator_that_does_not_exist",))
+
+
+def test_nested_holdout_error_reports_empty_split():
+    from pytest import raises
+
+    with raises(ValueError, match="select=0"):
+        split_nested_holdouts(SyntheticDeepfakeDataset(64), ("missing",), ("synth_gan",))
+
+
+def test_hf_dataset_without_generator_column_fails_fast_when_filtering(monkeypatch):
+    """CODE_REVIEW 2026-10-24: generator holdouts must not be silently skipped when metadata is absent."""
+    import datasets
+    from pytest import raises
+
+    from dfd.config import DataConfig
+    from dfd.data.datasets import HFImageDataset
+
+    imgs, labels = [_img((32, 32))] * 4, [0, 1, 0, 1]
+    no_gen = datasets.Dataset.from_dict({"image": imgs, "label": labels})
+    with_gen = datasets.Dataset.from_dict({"image": imgs, "label": labels, "generator": ["Real", "ADM", "Real", "SD15"]})
+    cfg = DataConfig(source="hf", generator_column="generator", holdout_generators=("Midjourney",))
+
+    monkeypatch.setattr(datasets, "load_dataset", lambda *a, **k: no_gen)
+    with raises(ValueError, match="column 'generator' is missing"):
+        HFImageDataset(cfg, "train", exclude_generators=("Midjourney",))
+    with raises(ValueError, match="missing"):
+        build_base_datasets(cfg)  # fails on the train split before training could leak the holdout
+    assert len(HFImageDataset(cfg, "train")) == 4  # no filtering requested -> still usable
+
+    # Train has generator metadata but validation does not: the holdout test split cannot be formed.
+    monkeypatch.setattr(datasets, "load_dataset", lambda *a, split=None, **k: with_gen if split == "train" else no_gen)
+    with raises(ValueError, match="need column"):
+        build_base_datasets(cfg)

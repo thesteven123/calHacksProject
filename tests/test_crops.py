@@ -47,26 +47,58 @@ def _ckpt(tmp_path):
     return tmp_path / "m.pt", img
 
 
-def test_pipeline_multicrop_reports_crops_and_flags_centre_calibration(tmp_path):
+FORCE_FAKE = {"temperature": 1.0, "tau_real": -1.0, "tau_fake": -0.5, "target_fpr": 0.01, "target_fnr": 0.02}
+FORCE_REAL = {"temperature": 1.0, "tau_real": 2.0, "tau_fake": 3.0, "target_fpr": 0.01, "target_fnr": 0.02}
+
+
+def test_pipeline_multicrop_abstains_on_centre_calibration_for_fake_and_real(tmp_path):
+    """Mismatched thresholds must never yield an automatic verdict in EITHER direction (CODE_REVIEW 2026-10-24)."""
     ckpt, img = _ckpt(tmp_path)
-    # Only centre-crop calibration exists, with thresholds that force a "fake" verdict.
-    (tmp_path / "calibration.json").write_text(json.dumps(
-        {"temperature": 1.0, "tau_real": -1.0, "tau_fake": -0.5, "target_fpr": 0.01, "target_fnr": 0.02}
-    ))
-    r = DetectionPipeline(ckpt, device="cpu", crop_mode="multi").predict(img)
-    assert r.details["crop_mode"] == "multi" and r.details["n_crops"] > 1
-    assert r.details["calibration_mismatch"] is True
-    assert r.verdict == "abstain" and r.escalate  # never auto-flag fake on mismatched thresholds
+    for forced in (FORCE_FAKE, FORCE_REAL):
+        (tmp_path / "calibration.json").write_text(json.dumps(forced))  # only centre-crop calibration exists
+        r = DetectionPipeline(ckpt, device="cpu", crop_mode="multi").predict(img)
+        assert r.details["crop_mode"] == "multi" and r.details["n_crops"] > 1
+        assert r.details["calibration_status"] == "mismatched"
+        assert r.verdict == "abstain" and r.escalate
+
+
+def test_pipeline_without_any_calibration_abstains_and_reports_missing(tmp_path):
+    ckpt, img = _ckpt(tmp_path)
+    for mode in ("center", "multi"):
+        r = DetectionPipeline(ckpt, device="cpu", crop_mode=mode).predict(img)
+        assert r.details["calibration_status"] == "missing" and r.verdict == "abstain"
 
 
 def test_pipeline_uses_multicrop_calibration_when_present(tmp_path):
     ckpt, img = _ckpt(tmp_path)
-    for name in ("calibration.json", "calibration_multicrop.json"):
-        (tmp_path / name).write_text(json.dumps(
-            {"temperature": 1.0, "tau_real": -1.0, "tau_fake": -0.5, "target_fpr": 0.01, "target_fnr": 0.02}
-        ))
+    for name in ("calibration.json", "calibration_multicrop.json"):  # legacy files: mode inferred from name
+        (tmp_path / name).write_text(json.dumps(FORCE_FAKE))
     r = DetectionPipeline(ckpt, device="cpu", crop_mode="multi").predict(img)
-    assert "calibration_mismatch" not in r.details and r.verdict == "fake"
+    assert r.details["calibration_status"] == "matched" and r.verdict == "fake"
+
+
+def test_explicit_calibration_file_with_wrong_mode_is_mismatched(tmp_path):
+    ckpt, img = _ckpt(tmp_path)
+    path = tmp_path / "custom.json"
+    path.write_text(json.dumps({**FORCE_FAKE, "crop_mode": "center"}))
+    r = DetectionPipeline(ckpt, calibration=path, device="cpu", crop_mode="multi").predict(img)
+    assert r.details["calibration_status"] == "mismatched" and r.verdict == "abstain"
+
+
+def test_temporal_checkpoint_rejects_multicrop_video(tmp_path):
+    import cv2
+    import pytest
+
+    torch.manual_seed(0)
+    DeepfakeDetector(ModelConfig(**TINY, temporal=True, temporal_dim=16)).save(tmp_path / "t.pt")
+    vid = tmp_path / "v.avi"
+    writer = cv2.VideoWriter(str(vid), cv2.VideoWriter_fourcc(*"MJPG"), 10, (320, 240))
+    for t in range(20):
+        writer.write(np.full((240, 320, 3), t * 10, dtype=np.uint8))
+    writer.release()
+    with pytest.raises(ValueError, match="temporal"):
+        DetectionPipeline(tmp_path / "t.pt", device="cpu", crop_mode="multi").predict(vid)
+    assert DetectionPipeline(tmp_path / "t.pt", device="cpu", crop_mode="center").predict(vid).media_type == "video"
 
 
 def test_pipeline_centre_mode_scores_single_crop(tmp_path):

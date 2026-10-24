@@ -69,14 +69,17 @@ class DetectionPipeline:
         self.model.to(self.device).eval()
         self.crop_mode, self.crop_k_frac = crop_mode, crop_k_frac
         # Multi-crop top-k scores sit higher than centre-crop scores, so thresholds must be fit per mode.
+        # Automatic real/fake verdicts are only issued with thresholds fit for THIS crop mode; otherwise every
+        # verdict becomes "abstain" (CODE_REVIEW 2026-10-24: mismatched or missing calibration).
         default_name = "calibration_multicrop.json" if crop_mode == "multi" else "calibration.json"
         cal_path = Path(calibration) if calibration else Path(checkpoint).with_name(default_name)
-        if not cal_path.exists() and crop_mode == "multi":
-            cal_path = Path(checkpoint).with_name("calibration.json")
-            self.calibration_mismatch = cal_path.exists()
+        if not cal_path.exists() and not calibration and crop_mode == "multi":
+            cal_path = Path(checkpoint).with_name("calibration.json")  # better-than-nothing scale, still abstains
+        if cal_path.exists():
+            self.cal = Calibration.load(cal_path)
+            self.calibration_status = "matched" if self.cal.crop_mode == crop_mode else "mismatched"
         else:
-            self.calibration_mismatch = False
-        self.cal = Calibration.load(cal_path) if cal_path.exists() else Calibration()
+            self.cal, self.calibration_status = Calibration(), "missing"
         no_pte = PTEConfig(enabled=False)
         self.transform = DetectorTransform(no_pte, self.model.cfg.image_size, train=False)
         self.multicrop = MultiCropTransform(no_pte, self.model.cfg.image_size, crop_grid)
@@ -107,12 +110,10 @@ class DetectionPipeline:
     def _finalize(self, path: str, media_type: str, logit: float, details: dict) -> Result:
         p = float(self.cal.prob(logit))
         verdict = self.cal.verdict(p)
-        details = {**details, "crop_mode": self.crop_mode}
-        if self.calibration_mismatch:
-            # Centre-crop thresholds applied to multi-crop scores: FPR is not controlled. Send to review.
-            details["calibration_mismatch"] = True
-            if verdict == "fake":
-                verdict = "abstain"
+        details = {**details, "crop_mode": self.crop_mode, "calibration_status": self.calibration_status}
+        if self.calibration_status != "matched":
+            # Thresholds were not fit on this score distribution: neither FPR nor FNR is controlled.
+            verdict = "abstain"
         return Result(path, media_type, "stage2", verdict, p, logit, verdict == "abstain", details)
 
     @torch.no_grad()
@@ -130,10 +131,13 @@ class DetectionPipeline:
     @torch.no_grad()
     def predict_video(self, path: str | Path, n_keyframes: int = 16) -> Result:
         path = str(path)
+        if self.crop_mode == "multi" and self.model.temporal is not None:
+            # A temporal adapter needs one aligned crop per frame; multi-crop would silently be ignored.
+            raise ValueError("crop_mode='multi' is not supported for video with a temporal checkpoint; use 'center'")
         frames, times, vid_info = sample_keyframes(path, n_keyframes=n_keyframes)
         if (hit := self._stage0(path, frames[0], "video")) is not None:
             return hit
-        if self.crop_mode == "multi" and self.model.temporal is None:
+        if self.crop_mode == "multi":
             # No temporal adapter: each keyframe is an independent image, so score it multi-crop.
             frame_logits_t = torch.tensor([self._score_image(f)[0] for f in frames])
             logit = float(topk_pool(frame_logits_t.unsqueeze(0), None, self.model.cfg.topk_frac)[0])

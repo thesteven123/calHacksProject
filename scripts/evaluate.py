@@ -88,6 +88,7 @@ def main() -> None:
 
     if args.save_calibration:
         cal = calibrate(last_preds["logits"], last_preds["labels"], cfg.train.target_fpr, cfg.train.target_fnr)
+        cal.crop_mode = "multi"
         cal_path = Path(args.checkpoint).with_name("calibration_multicrop.json")
         cal.save(cal_path)
         print(f"[calibration] wrote {cal_path} (fit split, {args.severities[0]}, multi-crop)")

@@ -50,7 +50,9 @@ class DeepfakeDetector(nn.Module):
 
     @classmethod
     def load(cls, path: str | Path, map_location: str | torch.device = "cpu") -> tuple["DeepfakeDetector", dict]:
-        ckpt = torch.load(path, map_location=map_location, weights_only=False)
+        # weights_only=True: refuse arbitrary pickled objects (code execution on load). Checkpoints contain only
+        # tensors and plain containers/primitives, so no allowlist is needed (CODE_REVIEW 2026-10-24, High).
+        ckpt = torch.load(path, map_location=map_location, weights_only=True)
         model = cls(from_dict(ModelConfig, ckpt["model_config"]))
         missing, unexpected = model.load_state_dict(ckpt["state_dict"], strict=False)
         if unexpected or any(not k.startswith("backbone.") or "lora_" in k for k in missing):

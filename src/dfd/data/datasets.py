@@ -73,7 +73,12 @@ class HFImageDataset(Dataset):
         gcol = cfg.generator_column
         self.gen_names = None
         self._meta: list[tuple[int, str]] | None = None
-        if gcol and gcol in ds.column_names:
+        self.has_generators = bool(gcol and gcol in ds.column_names)
+        if (include_generators is not None or exclude_generators) and not self.has_generators:
+            # Fail fast: silently skipping the filter would train on held-out generators (CODE_REVIEW 2026-10-24).
+            raise ValueError(f"Generator filtering requested but column {gcol!r} is missing from {split!r} "
+                             f"(columns: {ds.column_names})")
+        if self.has_generators:
             feat = ds.features[gcol]
             self.gen_names = feat.names if hasattr(feat, "names") else None
             labels = ds[cfg.label_column]
@@ -85,8 +90,10 @@ class HFImageDataset(Dataset):
             ds = ds.select(keep)
             self._meta = [self._meta[i] for i in keep]
         if max_samples is not None and len(ds) > max_samples:
-            ds = ds.shuffle(seed=0).select(range(max_samples))
-            self._meta = None  # positions no longer align with metadata; fall back to __getitem__
+            order = np.random.default_rng(0).permutation(len(ds))[:max_samples].tolist()
+            ds = ds.select(order)
+            if self._meta is not None:
+                self._meta = [self._meta[i] for i in order]  # keep metadata aligned with the subsample
         self.ds = ds
 
     def meta(self, idx: int) -> tuple[int, str]:
@@ -200,6 +207,11 @@ def split_val_holdout(
             test_fakes.append(i)
         else:
             sel.append(i)
+    if holdout_generators and not test_fakes:
+        # A configured holdout that matches nothing would silently yield an empty test (CODE_REVIEW 2026-10-24).
+        seen = sorted({val.meta(i)[1] for i in sel})
+        raise ValueError(f"Holdout generators {list(holdout_generators)} have no fakes in validation; "
+                         f"generators present: {seen}")
     if not test_fakes:
         return SubsetDataset(val, sorted(sel + reals)), SubsetDataset(val, [])
     reals = np.random.default_rng(seed).permutation(reals).tolist()
@@ -225,7 +237,12 @@ def split_nested_holdouts(
         else:
             fit.append(i)
     if not (fit and selection and test and len(reals) >= 3):
-        raise ValueError("Nested LOGO needs fake samples in each split and at least three real images")
+        seen = sorted({val.meta(i)[1] for i in fit + selection + test})
+        raise ValueError(
+            "Nested LOGO needs fake samples in each split and at least three real images: "
+            f"fit={len(fit)} select={len(selection)} test={len(test)} reals={len(reals)}; "
+            f"selection={list(selection_generators)} test={list(test_generators)} generators present: {seen}"
+        )
     reals = np.random.default_rng(seed).permutation(reals).tolist()
     thirds = (len(reals) // 3, 2 * len(reals) // 3)
     fit.extend(reals[:thirds[0]])
@@ -255,6 +272,9 @@ def build_base_datasets(cfg: DataConfig, seed: int = 0) -> tuple[Dataset, Datase
     if cfg.source == "hf":
         train = HFImageDataset(cfg, cfg.hf_train_split, exclude_generators=holdout, max_samples=cfg.max_train_samples)
         val = HFImageDataset(cfg, cfg.hf_val_split, max_samples=cfg.max_val_samples)
+        if holdout and not val.has_generators:
+            raise ValueError(f"Generator holdouts {list(holdout)} need column {cfg.generator_column!r} "
+                             f"in validation split {cfg.hf_val_split!r}")
         return train, val
     if cfg.source == "folder":
         if not cfg.folder_root:
