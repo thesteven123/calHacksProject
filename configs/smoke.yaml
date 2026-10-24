@@ -1,0 +1,20 @@
+# End-to-end smoke test on procedural synthetic data. Real backbone (dinov2-small, ~90MB download).
+model:
+  backbone: facebook/dinov2-small
+  feature_layers: [4, 8, 10, 12]
+  lora_rank: 4
+  lora_blocks: 2
+  hidden_dim: 256
+  latent_dim: 64
+data:
+  source: synthetic
+  synthetic_train_size: 192
+  synthetic_val_size: 128
+  synthetic_image_size: 256
+train:
+  epochs: 3
+  batch_size: 16
+  lr: 1.0e-3
+  lora_lr: 2.0e-4
+  log_every: 4
+  output_dir: runs/smoke

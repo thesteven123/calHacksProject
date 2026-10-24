@@ -1,0 +1,26 @@
+# Research-only (CC-BY-NC-SA-4.0). Fit on five generators; choose checkpoint on
+# unseen GLIDE; evaluate once on untouched Midjourney and disjoint real photos.
+model:
+  backbone: facebook/dinov2-base
+  feature_layers: [4, 8, 10, 12]
+  lora_rank: 8
+  lora_blocks: 3
+data:
+  source: hf
+  hf_data_files:
+    train:
+      - hf://datasets/TheKernel01/Tiny-GenImage/data/train-00000-of-00014.parquet
+      - hf://datasets/TheKernel01/Tiny-GenImage/data/train-00001-of-00014.parquet
+    validation:
+      - hf://datasets/TheKernel01/Tiny-GenImage/data/validation-00000-of-00004.parquet
+  hf_train_split: train
+  hf_val_split: validation
+  generator_column: generator
+  selection_generators: [GLIDE]
+  holdout_generators: [Midjourney]
+  num_workers: 4
+train:
+  epochs: 2
+  batch_size: 32
+  log_every: 10
+  output_dir: runs/tiny_genimage_nested

@@ -1,0 +1,11 @@
+.venv/
+.venv-tinker/
+__pycache__/
+*.egg-info/
+.pytest_cache/
+runs/
+data_cache/
+*.pt
+*.onnx
+.env
+wandb/

@@ -1,0 +1,18 @@
+# M2 MVP: DINOv2-base + LoRA + VIB on Tiny-GenImage with PTE, leave-one-generator-out (Midjourney held out).
+model:
+  backbone: facebook/dinov2-base
+  feature_layers: [4, 8, 10, 12]
+  lora_rank: 8
+  lora_blocks: 3
+data:
+  source: hf
+  hf_dataset: TheKernel01/Tiny-GenImage
+  hf_train_split: train
+  hf_val_split: validation
+  generator_column: generator
+  holdout_generators: [Midjourney]
+  num_workers: 4
+train:
+  epochs: 5
+  batch_size: 32
+  output_dir: runs/mvp_image_logo_midjourney

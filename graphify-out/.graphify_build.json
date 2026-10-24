@@ -1,0 +1,8 @@
+{
+  "excludes": [
+    ".devin",
+    ".devin/*",
+    ".devin/**",
+    ".env"
+  ]
+}
