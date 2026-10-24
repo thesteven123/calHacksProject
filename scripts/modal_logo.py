@@ -67,10 +67,14 @@ def train_rotation(selection: str, test: str, backbone: str, epochs: int, tag: s
 
     t0 = time.time()
     cfg = yaml.safe_load(Path(f"{REMOTE}/{base_config}").read_text())
-    name = f"{selection}-to-{test}"
+    name = "config" if selection is None else f"{selection}-to-{test}"
     out_dir = f"/runs/{tag}/{name}"
     cfg["model"]["backbone"] = backbone
-    cfg["data"].update(selection_generators=[selection], holdout_generators=[test], num_workers=6)
+    if selection is not None:
+        cfg["data"]["selection_generators"] = [selection]
+    if test is not None:
+        cfg["data"]["holdout_generators"] = [test]
+    cfg["data"]["num_workers"] = 6
     cfg["train"].update(epochs=epochs, output_dir=out_dir)
     cfg_path = Path(f"/tmp/{name}.yaml")
     cfg_path.write_text(yaml.safe_dump(cfg))
@@ -79,7 +83,10 @@ def train_rotation(selection: str, test: str, backbone: str, epochs: int, tag: s
     hf_cache.commit()  # persist downloaded datasets/weights for later rotations
     runs_vol.commit()
     wall = time.time() - t0
-    result = {"rotation": name, "selection": selection, "test": test, "backbone": backbone, "epochs": epochs,
+    result = {"rotation": name,
+              "selection": "+".join(cfg["data"].get("selection_generators") or []),
+              "test": "+".join(cfg["data"].get("holdout_generators") or []),
+              "backbone": backbone, "epochs": epochs,
               "returncode": proc.returncode, "wall_s": round(wall, 1), "est_cost_usd": round(wall * PRICE_PER_S, 3),
               "log_tail": (proc.stdout + proc.stderr)[-4000:]}
     report = Path(out_dir) / "report.json"
@@ -89,7 +96,12 @@ def train_rotation(selection: str, test: str, backbone: str, epochs: int, tag: s
 
 
 def _rotations(spec: str) -> list[tuple[str, str]]:
-    """'all' -> each generator is the test once, selection = the next generator in the cycle."""
+    """'all' -> each generator is the test once, selection = the next generator in the cycle.
+
+    'config' -> a single run keeping the base config's own selection/holdout generators.
+    """
+    if spec == "config":
+        return [(None, None)]
     if spec == "all":
         return [(GENERATORS[(i + 1) % len(GENERATORS)], g) for i, g in enumerate(GENERATORS)]
     pairs = [tuple(p.split(":")) for p in spec.split(",")]
