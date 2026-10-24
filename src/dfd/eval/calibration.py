@@ -18,6 +18,7 @@ class Calibration:
     tau_fake: float = 0.5
     target_fpr: float = 0.01
     target_fnr: float = 0.02
+    crop_mode: str = "center"  # score distribution these thresholds were fit on ("center" | "multi")
 
     def prob(self, logit: float | np.ndarray) -> np.ndarray:
         return 1 / (1 + np.exp(-np.asarray(logit, dtype=np.float64) / self.temperature))
@@ -34,7 +35,10 @@ class Calibration:
 
     @classmethod
     def load(cls, path: str | Path) -> "Calibration":
-        return cls(**json.loads(Path(path).read_text()))
+        data = json.loads(Path(path).read_text())
+        # Files written before crop_mode existed: infer it from the conventional filename.
+        data.setdefault("crop_mode", "multi" if "multicrop" in Path(path).name else "center")
+        return cls(**data)
 
 
 def fit_temperature(logits: np.ndarray, labels: np.ndarray, max_iter: int = 200) -> float:

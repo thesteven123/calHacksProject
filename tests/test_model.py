@@ -89,3 +89,27 @@ def test_transformer_blocks_found_for_dinov3_layout():
     outer = nn.Module()
     outer.model = inner
     assert len(_transformer_blocks(outer)) == 3
+
+
+def test_checkpoint_load_refuses_arbitrary_pickled_objects(tmp_path):
+    """CODE_REVIEW 2026-10-24 (High): loading must not execute code embedded in a checkpoint."""
+    import os
+
+    import pytest
+
+    marker = tmp_path / "pwned"
+
+    class Evil:
+        def __reduce__(self):
+            return (os.system, (f"touch {marker}",))
+
+    torch.manual_seed(0)
+    good = DeepfakeDetector(ModelConfig(**TINY))
+    good.save(tmp_path / "ok.pt")
+    ckpt = torch.load(tmp_path / "ok.pt", weights_only=True)
+    ckpt["payload"] = Evil()
+    torch.save(ckpt, tmp_path / "evil.pt")
+    with pytest.raises(Exception):
+        DeepfakeDetector.load(tmp_path / "evil.pt")
+    assert not marker.exists()
+    DeepfakeDetector.load(tmp_path / "ok.pt")  # legitimate checkpoints still load
