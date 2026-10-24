@@ -12,6 +12,7 @@ from PIL import Image
 from torch.utils.data import Dataset
 
 from dfd.config import DataConfig
+from dfd.data.paired import CompositeDataset, DeepFakeFaceDataset, SowaibaDataset, verify_no_group_leakage
 from dfd.data.transforms import DetectorTransform
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
@@ -281,7 +282,16 @@ def eval_splits(cfg: DataConfig, base_val: Dataset, seed: int = 0) -> dict[str, 
     else:
         select, final = split_val_holdout(base_val, test, seed=seed)
         fit = select
-    return {"all": base_val, "fit": fit, "select": select, "test": final}
+    splits = {"all": base_val, "fit": fit, "select": select, "test": final}
+    if cfg.sowaiba_eval:
+        splits["sowaiba"] = SowaibaDataset(
+            root=cfg.sowaiba_root,
+            split="all",
+            seed=seed,
+            max_samples=cfg.max_val_samples,
+            download=(cfg.sowaiba_root is None),
+        )
+    return splits
 
 
 def build_base_datasets(cfg: DataConfig, seed: int = 0) -> tuple[Dataset, Dataset]:
@@ -305,4 +315,44 @@ def build_base_datasets(cfg: DataConfig, seed: int = 0) -> tuple[Dataset, Datase
             raise ValueError("data.folder_root is required for source=folder")
         root = Path(cfg.folder_root)
         return FolderDataset(root / "train", holdout), FolderDataset(root / "val")
+    if cfg.source == "paired_faces":
+        train_parts: list[Dataset] = []
+        val_parts: list[Dataset] = []
+        if cfg.hf_data_files or cfg.hf_dataset:
+            train_hf = HFImageDataset(cfg, cfg.hf_train_split, exclude_generators=holdout, max_samples=cfg.max_train_samples)
+            val_hf = HFImageDataset(cfg, cfg.hf_val_split, max_samples=cfg.max_val_samples)
+            train_parts.append(train_hf)
+            val_parts.append(val_hf)
+
+        dff_train_gens = tuple(g for g in cfg.dff_generators if g not in holdout)
+        dff_val_gens = tuple(cfg.dff_generators)
+
+        dff_train = DeepFakeFaceDataset(
+            root=cfg.dff_root,
+            generators=dff_train_gens,
+            include_reals=True,
+            split="train",
+            val_frac=cfg.dff_val_fraction,
+            format_align=cfg.dff_format_align,
+            seed=seed,
+            max_samples=cfg.max_train_samples,
+            download=(cfg.dff_root is None),
+        )
+        dff_val = DeepFakeFaceDataset(
+            root=cfg.dff_root,
+            generators=dff_val_gens,
+            include_reals=True,
+            split="val",
+            val_frac=cfg.dff_val_fraction,
+            format_align=cfg.dff_format_align,
+            seed=seed,
+            max_samples=cfg.max_val_samples,
+            download=(cfg.dff_root is None),
+        )
+        train_parts.append(dff_train)
+        val_parts.append(dff_val)
+
+        train = CompositeDataset(train_parts) if len(train_parts) > 1 else train_parts[0]
+        val = CompositeDataset(val_parts) if len(val_parts) > 1 else val_parts[0]
+        return train, val
     raise ValueError(f"Unknown data source: {cfg.source}")

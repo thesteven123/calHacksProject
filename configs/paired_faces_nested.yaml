@@ -1,0 +1,52 @@
+# Paired Real/Fake Face Training & Nested LOGO Evaluation
+#
+# Training:
+#   - Full Tiny-GenImage (minus holdout/selection generators)
+#   - DeepFakeFace (OpenRL/DeepFakeFace) with inpainting + insight (paired by IMDB-WIKI relative paths)
+# Checkpoint Selection:
+#   - text2img (the 3rd DeepFakeFace generator type, unseen in training)
+# Holdout Evaluation (disjoint untouched test):
+#   - Midjourney (Tiny-GenImage unseen generator)
+#   - inswapper_128 (Sowaiba01/Deepfake cross-dataset holdout test)
+#
+# Pair-Grouping Guarantee:
+#   Every IMDB-WIKI real photo and its corresponding synthetic inpainting/insight/text2img
+#   edits are strictly partitioned into the same split (train vs. val), preventing near-duplicate leakage.
+#
+# Caching / Modal:
+#   Datasets auto-download from Hugging Face and cache under $HF_HOME / default HF cache.
+
+model:
+  backbone: facebook/dinov2-base
+  feature_layers: [4, 8, 10, 12]
+  lora_rank: 8
+  lora_blocks: 3
+
+data:
+  source: paired_faces
+  hf_dataset: TheKernel01/Tiny-GenImage
+  hf_train_split: train
+  hf_val_split: validation
+  generator_column: generator
+
+  # DeepFakeFace paired generators
+  dff_generators: [inpainting, insight, text2img]
+  dff_val_fraction: 0.2
+
+  # Checkpoint selection: 3rd DeepFakeFace generator (text2img)
+  selection_generators: [text2img]
+
+  # Untouched test holdouts: Tiny-GenImage (Midjourney)
+  holdout_generators: [Midjourney]
+  sowaiba_eval: true
+
+  num_workers: 4
+
+train:
+  epochs: 3
+  batch_size: 32
+  lr: 0.001
+  lora_lr: 0.0002
+  weight_decay: 0.05
+  log_every: 10
+  output_dir: runs/paired_faces_nested
