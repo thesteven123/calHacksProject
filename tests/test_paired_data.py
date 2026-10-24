@@ -262,3 +262,118 @@ def test_paired_faces_nested_split_and_sowaiba_isolation(tmp_path):
     assert select_fakes == {"text2img"}
     assert test_fakes == {"inpainting"}
     assert fit_fakes == {"insight"}
+
+
+def _create_partial_dff(tmp_path: Path, cats: list[str], num_identities: int = 10) -> Path:
+    """Like _create_synthetic_dff but writes only the given archive categories."""
+    root = tmp_path / "dff_partial"
+    root.mkdir(parents=True, exist_ok=True)
+    for cat in cats:
+        with zipfile.ZipFile(root / f"{cat}.zip", "w") as z:
+            for i in range(num_identities):
+                rel = f"folder_{(i % 4):02d}/person_{i:04d}.jpg"
+                img = Image.fromarray(np.full((64, 64, 3), 128, dtype=np.uint8))
+                bio = io.BytesIO()
+                img.save(bio, format="JPEG", quality=90)
+                z.writestr(f"{cat}/{rel}", bio.getvalue())
+    return root
+
+
+class _TinyGenStub:
+    """Singleton-row stub: reals + fakes cycling through the given generators (no group())."""
+
+    def __init__(self, n: int = 90, gens=("ADM", "Midjourney")):
+        self.n, self.gens = n, gens
+
+    def __len__(self):
+        return self.n
+
+    def meta(self, i):
+        if i % 3 == 0:
+            return 0, "real"
+        return 1, self.gens[(i // 3) % len(self.gens)]
+
+
+def _multi_groups(comp, subset):
+    from collections import Counter
+    gids = [comp.group(i) for i in subset.indices]
+    counts = Counter(gids)
+    return {g for g in gids if counts[g] > 1}
+
+
+def test_nested_split_keeps_pair_groups_isolated(tmp_path):
+    root = _create_synthetic_dff(tmp_path / "dff", num_identities=60)
+    dff = DeepFakeFaceDataset(root=root, split="all")
+    comp = CompositeDataset([_TinyGenStub(), dff])
+    fit, select, test = split_nested_holdouts(comp, ("text2img",), ("Midjourney",), seed=0)
+
+    f_g, s_g, t_g = (_multi_groups(comp, s) for s in (fit, select, test))
+    assert not (f_g & s_g) and not (f_g & t_g) and not (s_g & t_g)
+
+    def fakes(sub):
+        return {comp.meta(i)[1] for i in sub.indices if comp.meta(i)[0] == 1}
+    assert fakes(select) == {"text2img"}
+    assert fakes(test) == {"Midjourney"}
+    assert fakes(fit) <= {"ADM", "inpainting", "insight"} and fakes(fit)
+
+
+def test_val_holdout_keeps_pair_groups_isolated(tmp_path):
+    from dfd.data.datasets import split_val_holdout
+
+    root = _create_synthetic_dff(tmp_path / "dff", num_identities=60)
+    dff = DeepFakeFaceDataset(root=root, split="all")
+    comp = CompositeDataset([_TinyGenStub(), dff])
+    sel, test = split_val_holdout(comp, ("text2img",), seed=0, test_real_frac=0.5)
+
+    s_g, t_g = _multi_groups(comp, sel), _multi_groups(comp, test)
+    assert not (s_g & t_g)
+    assert all(comp.meta(i)[1] == "text2img" for i in test.indices if comp.meta(i)[0] == 1)
+    assert all(comp.meta(i)[1] != "text2img" for i in sel.indices)
+
+
+def test_singleton_rows_follow_original_algorithm():
+    """All-singleton datasets must produce exactly the pre-grouping indices."""
+    from dfd.data.datasets import split_val_holdout
+
+    val = _TinyGenStub(gens=("base", "selector", "final"))
+
+    def old_split_val_holdout(v, holdout, seed=0, frac=0.5):
+        sel, test_fakes, reals = [], [], []
+        for i in range(len(v)):
+            y, g = v.meta(i)
+            if y == 0:
+                reals.append(i)
+            elif g in holdout:
+                test_fakes.append(i)
+            else:
+                sel.append(i)
+        reals = np.random.default_rng(seed).permutation(reals).tolist()
+        n = int(round(len(reals) * frac))
+        return sorted(sel + reals[n:]), sorted(test_fakes + reals[:n])
+
+    sel, test = split_val_holdout(val, ("final",), seed=3)
+    exp_sel, exp_test = old_split_val_holdout(val, ("final",), seed=3)
+    assert sel.indices == exp_sel and test.indices == exp_test
+
+    # reference copy of the pre-grouping nested algorithm
+    fit, select, test = split_nested_holdouts(val, ("selector",), ("final",), seed=7)
+    f, s, t, reals = [], [], [], []
+    for i in range(len(val)):
+        y, g = val.meta(i)
+        (reals if y == 0 else s if g == "selector" else t if g == "final" else f).append(i)
+    reals = np.random.default_rng(7).permutation(reals).tolist()
+    th = (len(reals) // 3, 2 * len(reals) // 3)
+    assert fit.indices == sorted(f + reals[:th[0]])
+    assert select.indices == sorted(s + reals[th[0]:th[1]])
+    assert test.indices == sorted(t + reals[th[1]:])
+
+
+def test_partial_dff_root_fails_on_missing_types(tmp_path):
+    root = _create_partial_dff(tmp_path, ["wiki", "inpainting"])
+    with pytest.raises(FileNotFoundError, match="insight"):
+        DeepFakeFaceDataset(root=root, generators=("inpainting", "insight"), split="all")
+    root2 = _create_partial_dff(tmp_path / "nowiki", ["inpainting"])
+    with pytest.raises(FileNotFoundError, match="wiki"):
+        DeepFakeFaceDataset(root=root2, generators=("inpainting",), include_reals=True, split="all")
+    with pytest.raises(ValueError, match="root"):
+        DeepFakeFaceDataset(root=None, download=False)

@@ -120,7 +120,6 @@ class DeepFakeFaceDataset(Dataset):
         self._zips: dict[str, zipfile.ZipFile] = {}
         self.zip_paths: dict[str, Path] = {}
         self.folder_paths: dict[str, Path] = {}
-        self._is_zip_mode = True
 
         self._resolve_paths(root, download)
         self._index_items()
@@ -136,24 +135,21 @@ class DeepFakeFaceDataset(Dataset):
 
         if root is not None:
             r = Path(root)
-            # Check if root contains zip files
-            has_zips = any((r / f"{t}.zip").exists() for t in needed_types)
-            if has_zips:
-                self._is_zip_mode = True
-                for t in needed_types:
-                    zp = r / f"{t}.zip"
-                    if zp.exists():
-                        self.zip_paths[t] = zp
-            else:
-                # Check for extracted subfolders
-                self._is_zip_mode = False
-                for t in needed_types:
-                    dp = r / t
-                    if dp.exists() and dp.is_dir():
-                        self.folder_paths[t] = dp
+            # Each needed type resolves independently: <root>/<type>.zip or <root>/<type>/ directory.
+            for t in needed_types:
+                zp, dp = r / f"{t}.zip", r / t
+                if zp.exists():
+                    self.zip_paths[t] = zp
+                elif dp.is_dir():
+                    self.folder_paths[t] = dp
+            missing = [t for t in needed_types
+                       if t not in self.zip_paths and t not in self.folder_paths]
+            if missing:
+                raise FileNotFoundError(
+                    f"DeepFakeFace root {r} is missing {missing} "
+                    f"(each needed type must exist as <root>/<type>.zip or <root>/<type>/)")
         elif download:
             from huggingface_hub import hf_hub_download
-            self._is_zip_mode = True
             for t in needed_types:
                 zp = hf_hub_download(
                     repo_id="OpenRL/DeepFakeFace",
@@ -162,30 +158,30 @@ class DeepFakeFaceDataset(Dataset):
                     cache_dir=self.cache_dir,
                 )
                 self.zip_paths[t] = Path(zp)
+        else:
+            raise ValueError("DeepFakeFaceDataset requires a local `root` or download=True")
 
     def _index_items(self) -> None:
         # Group items by relative path
         # Map: rel_path -> list of (category, full_inner_name or file_path)
         group_to_items: dict[str, list[tuple[str, str | Path]]] = {}
 
-        if self._is_zip_mode:
-            for cat, zp in self.zip_paths.items():
-                with zipfile.ZipFile(zp, "r") as z:
-                    for name in z.namelist():
-                        if name.endswith("/"):
-                            continue
-                        ext = Path(name).suffix.lower()
-                        if ext in IMAGE_EXTS:
-                            # Normalize relative path: strip leading folder if present (e.g. wiki/61/... -> 61/...)
-                            parts = Path(name).parts
-                            rel_key = "/".join(parts[1:]) if len(parts) > 1 and parts[0] == cat else name
-                            group_to_items.setdefault(rel_key, []).append((cat, name))
-        else:
-            for cat, dp in self.folder_paths.items():
-                for p in sorted(dp.rglob("*")):
-                    if p.is_file() and p.suffix.lower() in IMAGE_EXTS:
-                        rel_key = str(p.relative_to(dp))
-                        group_to_items.setdefault(rel_key, []).append((cat, p))
+        for cat, zp in self.zip_paths.items():
+            with zipfile.ZipFile(zp, "r") as z:
+                for name in z.namelist():
+                    if name.endswith("/"):
+                        continue
+                    ext = Path(name).suffix.lower()
+                    if ext in IMAGE_EXTS:
+                        # Normalize relative path: strip leading folder if present (e.g. wiki/61/... -> 61/...)
+                        parts = Path(name).parts
+                        rel_key = "/".join(parts[1:]) if len(parts) > 1 and parts[0] == cat else name
+                        group_to_items.setdefault(rel_key, []).append((cat, name))
+        for cat, dp in self.folder_paths.items():
+            for p in sorted(dp.rglob("*")):
+                if p.is_file() and p.suffix.lower() in IMAGE_EXTS:
+                    rel_key = str(p.relative_to(dp))
+                    group_to_items.setdefault(rel_key, []).append((cat, p))
 
         # Split groups deterministically
         unique_groups = sorted(group_to_items.keys())
@@ -230,7 +226,7 @@ class DeepFakeFaceDataset(Dataset):
 
     def __getitem__(self, idx: int) -> tuple[Image.Image, int, str]:
         cat, target, label, gen, group_id = self.items[idx]
-        if self._is_zip_mode:
+        if cat in self.zip_paths:
             z = self._get_zip(cat)
             with z.open(str(target)) as f:
                 img = Image.open(io.BytesIO(f.read())).convert("RGB")
