@@ -90,7 +90,7 @@ def test_nested_holdouts_reject_overlap_and_missing_generator():
     data = SyntheticDeepfakeDataset(64)
     with raises(ValueError, match="distinct"):
         split_nested_holdouts(data, ("synth_gan",), ("synth_gan",))
-    with raises(ValueError, match="fake samples"):
+    with raises(ValueError, match=r"Selection generators \['missing'\]"):
         split_nested_holdouts(data, ("missing",), ("synth_gan",))
 
 
@@ -108,11 +108,12 @@ def test_holdout_matching_no_validation_fakes_fails_fast():
         split_val_holdout(SyntheticDeepfakeDataset(32), ("generator_that_does_not_exist",))
 
 
-def test_nested_holdout_error_reports_empty_split():
+def test_nested_holdout_error_reports_empty_fit_split():
+    """All fakes claimed by selection/test leaves `fit` empty: the count-based guard must still fire."""
     from pytest import raises
 
-    with raises(ValueError, match="select=0"):
-        split_nested_holdouts(SyntheticDeepfakeDataset(64), ("missing",), ("synth_gan",))
+    with raises(ValueError, match="fit=0"):
+        split_nested_holdouts(SyntheticDeepfakeDataset(64), ("synth_diff",), ("synth_gan",))
 
 
 def test_hf_dataset_without_generator_column_fails_fast_when_filtering(monkeypatch):
@@ -139,3 +140,34 @@ def test_hf_dataset_without_generator_column_fails_fast_when_filtering(monkeypat
     monkeypatch.setattr(datasets, "load_dataset", lambda *a, split=None, **k: with_gen if split == "train" else no_gen)
     with raises(ValueError, match="need column"):
         build_base_datasets(cfg)
+
+
+class _ThreeGeneratorVal:
+    """Validation stub: reals plus fakes from base / selector / final (no image decoding needed)."""
+
+    def __len__(self):
+        return 90
+
+    def meta(self, i):
+        return (0, "real") if i % 3 == 0 else (1, ("base", "selector", "final")[(i // 3) % 3])
+
+
+def test_every_configured_holdout_generator_must_have_fakes():
+    """Re-review (Medium): a multi-generator holdout must fail if ANY one generator matches nothing."""
+    from pytest import raises
+
+    val = _ThreeGeneratorVal()
+    split_val_holdout(val, ("final",))  # sanity: a valid single holdout passes
+    with raises(ValueError, match=r"Holdout generators \['typo'\]"):
+        split_val_holdout(val, ("final", "typo"))
+
+
+def test_every_configured_nested_generator_must_have_fakes():
+    from pytest import raises
+
+    val = _ThreeGeneratorVal()
+    split_nested_holdouts(val, ("selector",), ("final",))  # sanity
+    with raises(ValueError, match=r"Selection generators \['typo'\]"):
+        split_nested_holdouts(val, ("selector", "typo"), ("final",))
+    with raises(ValueError, match=r"Test generators \['typo'\]"):
+        split_nested_holdouts(val, ("selector",), ("final", "typo"))

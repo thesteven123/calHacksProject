@@ -76,14 +76,15 @@ def main() -> None:
         y = np.array([p["label"] for p in vj["preds"]])
         v = np.array([p["logit"] for p in vj["preds"]])
         c = core_logits(model, cfg, splits[name], idx, device)
-        data[name] = {"y": y, "core": c, "vlm": v}
+        data[name] = {"y": y, "core": c, "vlm": v, "gen": np.array([p["generator"] for p in vj["preds"]])}
         print(f"[{name}] n={len(y)} (fakes {int(y.sum())}) core+vlm paired")
 
     fit = data["fit"]
     fusion = fit_fusion(np.c_[fit["core"], fit["vlm"]], fit["y"], ["core", "vlm"])
     for d in data.values():
         d["fused"] = fusion(np.c_[d["core"], d["vlm"]])
-    cals = {r: calibrate(fit[r], fit["y"], cfg.train.target_fpr, cfg.train.target_fnr) for r in ("core", "vlm", "fused")}
+    cals = {r: calibrate(fit[r], fit["y"], cfg.train.target_fpr, cfg.train.target_fnr,
+                         method=cfg.train.calibration_method, generators=fit["gen"]) for r in ("core", "vlm", "fused")}
     print(f"[fusion] weights core={fusion.weights[0]:.3f} vlm={fusion.weights[1]:.3f} (standardized, fit on 'fit')")
 
     report = {"fusion": fusion.to_dict(), "calibration": {r: c.__dict__ for r, c in cals.items()}, "splits": {}}

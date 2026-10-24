@@ -94,6 +94,7 @@ class TrainConfig:
     max_steps: int | None = None
     target_fpr: float = 0.01
     target_fnr: float = 0.02
+    calibration_method: str = "conformal"  # "conformal" (split-conformal, per-generator FNR) | "empirical"
 
 
 @dataclass

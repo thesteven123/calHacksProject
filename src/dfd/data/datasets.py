@@ -188,6 +188,27 @@ class TransformedDataset(Dataset):
         }
 
 
+def _require_each_generator(fake_counts: dict[str, int], role: str, generators: tuple[str, ...]) -> None:
+    """Every configured generator must contribute validation fakes, not just the group as a whole.
+
+    Otherwise a multi-generator rotation where one name matches nothing (typo, absent from the shard subset)
+    silently runs as a smaller rotation than requested (CODE_REVIEW 2026-10-24 re-review, Medium).
+    """
+    missing = [g for g in generators if fake_counts.get(g, 0) == 0]
+    if missing:
+        raise ValueError(f"{role} generators {missing} have no fakes in validation; "
+                         f"generators present: {sorted(fake_counts)}")
+
+
+def _fake_generator_counts(val: Dataset) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for i in range(len(val)):
+        label, gen = val.meta(i)
+        if label:
+            counts[gen] = counts.get(gen, 0) + 1
+    return counts
+
+
 def split_val_holdout(
     val: Dataset, holdout_generators: tuple[str, ...], seed: int = 0, test_real_frac: float = 0.5
 ) -> tuple[SubsetDataset, SubsetDataset]:
@@ -207,11 +228,9 @@ def split_val_holdout(
             test_fakes.append(i)
         else:
             sel.append(i)
-    if holdout_generators and not test_fakes:
-        # A configured holdout that matches nothing would silently yield an empty test (CODE_REVIEW 2026-10-24).
-        seen = sorted({val.meta(i)[1] for i in sel})
-        raise ValueError(f"Holdout generators {list(holdout_generators)} have no fakes in validation; "
-                         f"generators present: {seen}")
+    if holdout_generators:
+        # Each configured holdout must match validation fakes (CODE_REVIEW 2026-10-24 + re-review).
+        _require_each_generator(_fake_generator_counts(val), "Holdout", tuple(holdout_generators))
     if not test_fakes:
         return SubsetDataset(val, sorted(sel + reals)), SubsetDataset(val, [])
     reals = np.random.default_rng(seed).permutation(reals).tolist()
@@ -225,6 +244,9 @@ def split_nested_holdouts(
     """Disjoint fit, OOD checkpoint-selection, and untouched final-test sets."""
     if not selection_generators or not test_generators or set(selection_generators) & set(test_generators):
         raise ValueError("Nested LOGO requires distinct, non-empty selection and test generator sets")
+    counts = _fake_generator_counts(val)
+    _require_each_generator(counts, "Selection", tuple(selection_generators))
+    _require_each_generator(counts, "Test", tuple(test_generators))
     fit, selection, test, reals = [], [], [], []
     for i in range(len(val)):
         label, generator = val.meta(i)
@@ -263,6 +285,8 @@ def eval_splits(cfg: DataConfig, base_val: Dataset, seed: int = 0) -> dict[str, 
 
 
 def build_base_datasets(cfg: DataConfig, seed: int = 0) -> tuple[Dataset, Dataset]:
+    if cfg.source == "deepfake_eval_2024" or "Deepfake-Eval-2024" in (cfg.hf_dataset or ""):
+        raise ValueError("Deepfake-Eval-2024 is evaluation-only (licence/terms); use scripts/eval_deepfake_eval_2024.py")
     holdout = tuple(cfg.holdout_generators) + tuple(cfg.selection_generators)
     if cfg.source == "synthetic":
         train = SyntheticDeepfakeDataset(cfg.synthetic_train_size, cfg.synthetic_image_size, seed)
