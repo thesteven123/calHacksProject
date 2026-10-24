@@ -40,3 +40,13 @@
 - Generalization across modern generators (unseen diffusion models like Sora, Kling, Wan2.1, Flux, SD3)
 - Social-media constraints: cascaded compression/re-encoding, mobile beautification filters, latency, scale, high-throughput inference
 - Datasets & benchmarks: Omni-Fake, SIDA, Deepfake-Eval-2024, TrueFake, PDID, DAID fairness benchmarks
+
+## Git & GitHub Coordination Protocol (copilot-git-organizer)
+
+- **Owner:** `copilot-git-organizer` owns ALL git/GitHub operations (repo setup, commits, branches, pushes, PRs, merges).
+- **Rule:** Do not run `git commit`, `git push`, `git branch`, `git merge`, or `git rebase` directly. Request `copilot-git-organizer` to perform git actions.
+- **Branch Naming by Role:**
+  - `devin-impl`: `impl/<topic>`
+  - `agy-research` (Antigravity): `research/<topic>`
+  - `copilot-code-review`: `review/<topic>`
+- **Workflow:** When a unit of work is ready, message `copilot-git-organizer` with the target branch name and summary of changes to commit, push, and open the PR.
