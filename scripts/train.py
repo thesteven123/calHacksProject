@@ -18,9 +18,10 @@ from dfd.env import load_dotenv
 from dfd.data.datasets import TransformedDataset, build_base_datasets, split_nested_holdouts, split_val_holdout
 from dfd.data.transforms import DetectorTransform
 from dfd.eval.calibration import calibrate
+from dfd.eval.extra import evaluate_extra_splits, extra_eval_splits, verdict_rates
 from dfd.eval.metrics import report_to_markdown
 from dfd.models.detector import DeepfakeDetector
-from dfd.training.trainer import Trainer, seed_everything
+from dfd.training.trainer import Trainer, resolve_device, seed_everything
 
 
 def main() -> None:
@@ -70,27 +71,28 @@ def main() -> None:
     gens = np.asarray(fit_preds["generators"])
     test_logits = np.asarray(best["test_preds"]["logits"]) if "test_preds" in best else logits
     held = np.asarray(best["test_preds"]["labels"]) if "test_preds" in best else labels
-    reals, fakes = held == 0, held == 1
-
-    def verdict_rates(c) -> dict:
-        v = np.array([c.verdict(p) for p in c.prob(test_logits)])
-        return {
-            "split": "test" if "test_preds" in best else "selection",
-            "abstain_rate": float((v == "abstain").mean()),
-            "fpr_fake_verdict": float((v[reals] == "fake").mean()) if reals.any() else None,
-            "fnr_real_verdict": float((v[fakes] == "real").mean()) if fakes.any() else None,
-            "calibration": c.__dict__,
-        }
+    test_split = "test" if "test_preds" in best else "selection"
 
     # Primary calibration (saved + used at inference) and the alternative, reported side by side on the same test.
     cals = {m: calibrate(logits, labels, cfg.train.target_fpr, cfg.train.target_fnr, method=m, generators=gens)
             for m in ("conformal", "empirical")}
     cal = cals[cfg.train.calibration_method]
     cal.save(out / "calibration.json")
-    best["report"]["verdicts_heldout"] = verdict_rates(cal)
-    best["report"]["verdicts_by_method"] = {m: verdict_rates(c) for m, c in cals.items()}
+    best["report"]["verdicts_heldout"] = verdict_rates(cal, test_logits, held, test_split)
+    best["report"]["verdicts_by_method"] = {m: verdict_rates(c, test_logits, held, test_split)
+                                            for m, c in cals.items()}
     if "test_report" in best:
         best["report"]["eval_test"] = best["test_report"]
+    if extra_eval_splits(cfg.data, base_val, cfg.train.seed):
+        eval_model, _ = DeepfakeDetector.load(out / "best.pt")
+        device = resolve_device(cfg.train.device)
+        eval_model.to(device).eval()
+        extra = evaluate_extra_splits(eval_model, cfg, base_val, cals, device, loader_kw)
+        if extra:
+            best["report"]["eval_extra"] = extra
+            for name, r in extra.items():
+                ov = r["report"]["overall"]
+                print(f"[extra|{name}] n={ov['n']} auc={ov['auc']} tpr@1%fpr={ov['tpr@1%fpr']}")
     (out / "report.json").write_text(json.dumps(best["report"], indent=2))
     md = report_to_markdown(best["report"], f"Validation report: {out.name}")
     md += "\n## Verdicts (final test)\n```json\n" + json.dumps(best["report"]["verdicts_heldout"], indent=2) + "\n```\n"

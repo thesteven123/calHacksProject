@@ -35,7 +35,8 @@ def main() -> None:
     ap.add_argument("--config", required=True, help="Config providing the data section")
     ap.add_argument("--severities", nargs="+", default=list(SEVERITY_PRESETS),
                     help=f"Any of {list(SEVERITY_PRESETS)} or 'train_mix' (the config's training PTE mix)")
-    ap.add_argument("--split", choices=["all", "fit", "select", "test"], default="all")
+    ap.add_argument("--split", default="all",
+                    help="Any split name from eval_splits() (e.g. all, fit, select, test, or extras)")
     ap.add_argument("--crop-mode", choices=["center", "multi", "both"], default="center")
     ap.add_argument("--save-calibration", action="store_true",
                     help="Fit calibration_multicrop.json (requires --split fit, --crop-mode multi, one severity)")
@@ -55,7 +56,10 @@ def main() -> None:
     model, _ = DeepfakeDetector.load(args.checkpoint)
     model.to(device).eval()
     _, base_val = build_base_datasets(cfg.data, cfg.train.seed)
-    base = eval_splits(cfg.data, base_val, cfg.train.seed)[args.split]
+    splits = eval_splits(cfg.data, base_val, cfg.train.seed)
+    if args.split not in splits:
+        raise SystemExit(f"Unknown split {args.split!r}; available: {sorted(splits)}")
+    base = splits[args.split]
     if len(base) == 0:
         raise SystemExit(f"Split {args.split!r} is empty for this config")
     modes = ["center", "multi"] if args.crop_mode == "both" else [args.crop_mode]
