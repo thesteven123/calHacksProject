@@ -87,7 +87,8 @@ def main() -> None:
                                             "label": y, "generator": g, "n_crops": nc}) + "\n")
 
     if args.save_calibration:
-        cal = calibrate(last_preds["logits"], last_preds["labels"], cfg.train.target_fpr, cfg.train.target_fnr)
+        cal = calibrate(last_preds["logits"], last_preds["labels"], cfg.train.target_fpr, cfg.train.target_fnr,
+                        method=cfg.train.calibration_method, generators=last_preds["generators"])
         cal.crop_mode = "multi"
         cal_path = Path(args.checkpoint).with_name("calibration_multicrop.json")
         cal.save(cal_path)

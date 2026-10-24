@@ -285,6 +285,8 @@ def eval_splits(cfg: DataConfig, base_val: Dataset, seed: int = 0) -> dict[str, 
 
 
 def build_base_datasets(cfg: DataConfig, seed: int = 0) -> tuple[Dataset, Dataset]:
+    if cfg.source == "deepfake_eval_2024" or "Deepfake-Eval-2024" in (cfg.hf_dataset or ""):
+        raise ValueError("Deepfake-Eval-2024 is evaluation-only (licence/terms); use scripts/eval_deepfake_eval_2024.py")
     holdout = tuple(cfg.holdout_generators) + tuple(cfg.selection_generators)
     if cfg.source == "synthetic":
         train = SyntheticDeepfakeDataset(cfg.synthetic_train_size, cfg.synthetic_image_size, seed)

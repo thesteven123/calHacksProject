@@ -509,3 +509,62 @@ in this setup, with the same LoRA/VIB recipe and hyperparameters tuned for DINOv
 **Next on Modal (cheap now that a run costs ~$0.04):** full Tiny-GenImage (14 train / 4 val shards) to cut
 test noise; ablations on the 7-rotation yardstick (LoRA off, β ∈ {0, 1e-4, 1e-2}, last-layer-only features);
 a DINOv3 learning-rate sweep before rejecting it outright.
+
+### 2026-10-24 (later): split-conformal thresholds + full Tiny-GenImage, 7-rotation nested LOGO
+
+**Calibration** (`dfd.eval.calibration.calibrate(method="conformal")`; now the default, `train.calibration_method`):
+- `tau_fake` is the split-conformal upper threshold on *real* probabilities: the ⌈(n+1)(1−α)⌉-th order statistic,
+  and a verdict is "fake" iff p > q. This gives P(real auto-flagged) ≤ α for reals exchangeable with the
+  calibration reals.
+- `tau_real` is the **minimum over known generators** of each generator's conformal lower threshold (the
+  ⌊(n+1)β⌋-th order statistic), so the hardest known generator sets it.
+- With too few points (fewer than 99 reals for α = 1%, or fewer than 49 fakes per generator for β = 2%), the
+  thresholds become ±∞ and the system never auto-decides; on the smoke data it abstains 100%, by design.
+- The legacy pooled-quantile method is kept as `method="empirical"`. `train.py` reports both on the same test
+  split (`verdicts_by_method`), and `Calibration` records `method`, `n_cal_real` and `tau_real_by_generator`.
+
+**What conformal does *not* give:**
+1. The FPR bound holds only if deployment reals look like the calibration reals, i.e. pass through the same
+   platform transcoding emulation. Deepfake-Eval-2024 will test this.
+2. The bound is **marginal** (in expectation over calibration draws). A single calibration can exceed α.
+3. There is **no FNR guarantee for unseen generators**: they are not exchangeable with any calibration set.
+
+**Full dataset run** (`configs/tiny_genimage_nested_full.yaml`): 28k train / 7k val, versus the earlier
+4k / 1.75k subset. About 1,167 test reals per rotation. Modal app `dfd-logo`, L4 GPUs, 6.5–10.2 min per
+rotation, **≈ $1.30 total (estimate)**.
+
+| Test generator | AUC | TPR@1%FPR | Conformal FPR / FNR / abstain | Empirical FPR / FNR / abstain |
+|---|---|---|---|---|
+| ADM | 0.843 | 0.180 | 0.009 / 0.084 / 0.55 | 0.009 / 0.152 / 0.43 |
+| BigGAN | 0.978 | 0.676 | 0.015 / 0.000 / 0.47 | 0.015 / 0.002 / 0.35 |
+| GLIDE | 0.954 | 0.434 | 0.012 / 0.016 / 0.40 | 0.012 / 0.056 / 0.26 |
+| Midjourney | 0.741 | 0.088 | 0.007 / **0.326** / 0.41 | 0.011 / 0.462 / 0.27 |
+| SD15 | 0.958 | 0.454 | 0.014 / 0.010 / 0.47 | 0.015 / 0.014 / 0.39 |
+| VQDM | 0.980 | 0.738 | 0.008 / 0.006 / 0.45 | 0.009 / 0.008 / 0.32 |
+| Wukong | 0.948 | 0.372 | 0.018 / 0.018 / 0.43 | 0.018 / 0.028 / 0.34 |
+| **Mean** | **0.915** [0.847, 0.965] | **0.420** [0.259, 0.578] | 0.012 / **0.066** / 0.45 | 0.013 / 0.103 / 0.34 |
+
+**Read-outs:**
+1. **More data helped a lot.** Mean unseen-generator AUC went from 0.845 to **0.915** and TPR@1%FPR from 0.24
+   to **0.42**, with the same model and protocol. The old subset results were not paired with these (different
+   test sets), so treat the gain as large but approximate. Midjourney remains the outlier (AUC 0.741).
+2. **Conformal vs. empirical:** conformal cuts missed fakes on unseen generators from 10.3% to **6.6%** (on
+   GLIDE, 5.6% to 1.6%). The price is more abstentions: 45% vs. 34% go to human review.
+3. **FPR:** mean 1.2%, worst 1.8% (Wukong), against the 1% target; 4 of 7 rotations are above 1%. This is
+   consistent with the bound being marginal: the expected per-calibration spread is about ±0.4 percentage
+   points at n ≈ 1,167. It is not yet evidence of a violation, but a single deployment can exceed 1%. A
+   high-probability ("PAC", training-conditional) variant that holds with probability 1−δ is a candidate next
+   step, at the cost of more abstentions.
+4. **Unseen generators still break the FNR target** (Midjourney 32.6%). Abstention and escalation remain the
+   safety net, not the thresholds.
+
+**Also added:**
+- `dfd.data.deepfake_eval` and `scripts/eval_deepfake_eval_2024.py`: Deepfake-Eval-2024 as an evaluation-only
+  set. Gated; `build_base_datasets` refuses it as a training source. The layout was confirmed from the file
+  listing (image/video/audio folders plus `*-metadata-publish.csv`), and column names are detected at load time.
+  It waits on user access approval.
+- **Paired-data candidates, verified on the HF API:**
+  - `OpenRL/DeepFakeFace`: OpenRAIL, 5.1 GB, `wiki` real + `inpainting` / `insight` / `text2img` fakes,
+    1:1 paired by identical relative path.
+  - `Sowaiba01/Deepfake`: MIT, 5,352 metadata pairs, `inswapper_128`.
+  - `kd13/deepfakebench-unfiltered` and `dbristow/inpaint_bench` (from research notes) **do not exist**.

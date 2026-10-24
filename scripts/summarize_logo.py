@@ -29,7 +29,8 @@ def load(run_dir: Path) -> dict[str, dict]:
             out[r["rotation"]] = {"test": r["test"], "cost": r["est_cost_usd"], "wall_s": r["wall_s"],
                                   **{m: test[m] for m in METRICS},
                                   "fnr": r["report"]["verdicts_heldout"]["fnr_real_verdict"],
-                                  "abstain": r["report"]["verdicts_heldout"]["abstain_rate"]}
+                                  "abstain": r["report"]["verdicts_heldout"]["abstain_rate"],
+                                  "by_method": r["report"].get("verdicts_by_method", {})}
         else:
             print(f"  ! {f.name}: missing/failed (rc={r.get('returncode')})")
     return out
@@ -60,6 +61,21 @@ def table(name: str, rows: dict[str, dict]) -> None:
         lo, hi = boot_ci(x)
         print(f"- mean {m}: **{x.mean():.3f}** (95% CI over rotations [{lo:.3f}, {hi:.3f}]), min {x.min():.3f}, max {x.max():.3f}")
     print(f"- total est. cost ${sum(r['cost'] for r in rows.values()):.2f}")
+    methods = sorted({m for r in rows.values() for m in r["by_method"]})
+    if methods:
+        print(f"\n### Verdicts on the unseen test generator, by calibration method (targets FPR<=1%, FNR<=2%)")
+        print("| test gen | " + " | ".join(f"{m} FPR / FNR / abstain" for m in methods) + " |")
+        print("|---|" + "---|" * len(methods))
+        for _, r in sorted(rows.items(), key=lambda kv: kv[1]["test"]):
+            cells = [f"{v['fpr_fake_verdict']:.3f} / {v['fnr_real_verdict']:.3f} / {v['abstain_rate']:.2f}"
+                     for v in (r["by_method"][m] for m in methods)]
+            print(f"| {r['test']} | " + " | ".join(cells) + " |")
+        for m in methods:
+            v = [r["by_method"][m] for r in rows.values() if m in r["by_method"]]
+            print(f"- {m}: mean FPR {np.mean([x['fpr_fake_verdict'] for x in v]):.3f}, "
+                  f"max FPR {np.max([x['fpr_fake_verdict'] for x in v]):.3f}, "
+                  f"mean FNR {np.mean([x['fnr_real_verdict'] for x in v]):.3f}, "
+                  f"mean abstain {np.mean([x['abstain_rate'] for x in v]):.2f}")
 
 
 def main() -> None:

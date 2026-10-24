@@ -67,20 +67,28 @@ def main() -> None:
     fit_preds = best.get("fit_preds", best["preds"])
     logits = np.asarray(fit_preds["logits"])
     labels = np.asarray(fit_preds["labels"])
-    cal = calibrate(logits, labels, cfg.train.target_fpr, cfg.train.target_fnr)
-    cal.save(out / "calibration.json")
+    gens = np.asarray(fit_preds["generators"])
     test_logits = np.asarray(best["test_preds"]["logits"]) if "test_preds" in best else logits
     held = np.asarray(best["test_preds"]["labels"]) if "test_preds" in best else labels
-    probs = cal.prob(test_logits)
-    verdicts = np.array([cal.verdict(p) for p in probs])
     reals, fakes = held == 0, held == 1
-    best["report"]["verdicts_heldout"] = {
-        "split": "test" if "test_preds" in best else "selection",
-        "abstain_rate": float((verdicts == "abstain").mean()),
-        "fpr_fake_verdict": float((verdicts[reals] == "fake").mean()) if reals.any() else None,
-        "fnr_real_verdict": float((verdicts[fakes] == "real").mean()) if fakes.any() else None,
-        "calibration": cal.__dict__,
-    }
+
+    def verdict_rates(c) -> dict:
+        v = np.array([c.verdict(p) for p in c.prob(test_logits)])
+        return {
+            "split": "test" if "test_preds" in best else "selection",
+            "abstain_rate": float((v == "abstain").mean()),
+            "fpr_fake_verdict": float((v[reals] == "fake").mean()) if reals.any() else None,
+            "fnr_real_verdict": float((v[fakes] == "real").mean()) if fakes.any() else None,
+            "calibration": c.__dict__,
+        }
+
+    # Primary calibration (saved + used at inference) and the alternative, reported side by side on the same test.
+    cals = {m: calibrate(logits, labels, cfg.train.target_fpr, cfg.train.target_fnr, method=m, generators=gens)
+            for m in ("conformal", "empirical")}
+    cal = cals[cfg.train.calibration_method]
+    cal.save(out / "calibration.json")
+    best["report"]["verdicts_heldout"] = verdict_rates(cal)
+    best["report"]["verdicts_by_method"] = {m: verdict_rates(c) for m, c in cals.items()}
     if "test_report" in best:
         best["report"]["eval_test"] = best["test_report"]
     (out / "report.json").write_text(json.dumps(best["report"], indent=2))
