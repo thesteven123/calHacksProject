@@ -9,3 +9,9 @@ data_cache/
 *.onnx
 .env
 wandb/
+
+# local-only tooling state (untracked by repo-hygiene)
+.devin/*.local.json
+graphify-out/cache/
+graphify-out/.graphify_python
+graphify-out/.graphify_root
