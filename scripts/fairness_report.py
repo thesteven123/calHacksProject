@@ -52,6 +52,9 @@ def _summary_line(name: str, s: dict, target: float | None) -> str:
     ratio = "n/a (min 0)" if s["ratio"] is None else f"{s['ratio']:.2f}x"
     gap_ci = s.get("gap_ci")
     gap = _pct(s["gap"]) + (f" [{_pct(gap_ci[0])}, {_pct(gap_ci[1])}]" if gap_ci else "")
+    if s.get("gap_eb") is not None:
+        eb_ci = s.get("gap_eb_ci")
+        gap += f", EB-shrunk gap {_pct(s['gap_eb'])}" + (f" [{_pct(eb_ci[0])}, {_pct(eb_ci[1])}]" if eb_ci else "")
     line = (f"- **{name}**: max {s['max_group']} {_pct(s['max_rate'])}, min {s['min_group']} {_pct(s['min_rate'])}, "
             f"gap {gap}, ratio {ratio}")
     if target is not None:
@@ -65,7 +68,8 @@ def _summary_line(name: str, s: dict, target: float | None) -> str:
 def render_input(label: str, report: dict) -> list[str]:
     fair = report["fairness"]
     lines = [f"## {label}", "", f"- checkpoint: `{report.get('checkpoint', '?')}`",
-             f"- calibration: {report.get('calibration', {}).get('status', '?')}, target FPR {_pct(fair['target_fpr'])}, "
+             f"- calibration: {report.get('calibration', {}).get('status', '?')}, "
+             f"target FPR {_pct(fair['target_fpr'])}, "
              f"min_n {fair['min_n']}", f"- overall FPR {_pct(report['overall'].get('fpr_fake_verdict'))}, "
              f"review {_pct(report['overall'].get('abstain_rate'))}, n {report['overall'].get('n')}"]
     if not fair["verdicts_valid"]:
@@ -75,6 +79,9 @@ def render_input(label: str, report: dict) -> list[str]:
     lines += ["", "### Race", ""] + _table(attrs["race"], report.get("by_race"))
     if "race|gender" in attrs:
         lines += ["", "### Race x gender", ""] + _table(attrs["race|gender"], None)
+    if "race|gender|age3" in attrs:
+        lines += ["", "### Race x gender x age (young 0-19 / adult 20-59 / senior 60+)", ""] + _table(
+            attrs["race|gender|age3"], None)
     lines += ["", "### Summary", ""]
     for attr, block in attrs.items():
         lines.append(_summary_line(f"{attr} FPR", block["fpr"]["summary"], fair["target_fpr"]))
@@ -89,8 +96,9 @@ def render_comparison(labels: list[str], reports: list[dict]) -> list[str]:
 
     def gap(rep, attr):
         s = rep["fairness"]["attributes"].get(attr, {}).get("fpr", {}).get("summary", {})
-        ci = s.get("gap_ci")
-        return _pct(s.get("gap")) + (f" [{_pct(ci[0])}, {_pct(ci[1])}]" if ci else "")
+        ci = s.get("gap_eb_ci")
+        eb = f" (EB {_pct(s['gap_eb'])} [{_pct(ci[0])}, {_pct(ci[1])}])" if s.get("gap_eb") is not None and ci else ""
+        return _pct(s.get("gap")) + eb
 
     def holm(rep, attr):
         s = rep["fairness"]["attributes"].get(attr, {}).get("fpr", {}).get("summary", {})
@@ -112,8 +120,13 @@ def render_comparison(labels: list[str], reports: list[dict]) -> list[str]:
 def render(labels: list[str], reports: list[dict]) -> str:
     lines = ["# FairFace fairness report", "",
              "FPR = share of real faces with verdict 'fake'; review = share with verdict 'abstain'. "
-             "Brackets are 95% Wilson intervals (gap: parametric bootstrap); gap/ratio use only groups with n >= min_n. "
-             "'Holm' = exact one-sided binomial test of rate > target, Holm-corrected within each attribute.", ""]
+             "Brackets are 95% Wilson intervals (gap: parametric bootstrap); gap/ratio use only groups with "
+             "n >= min_n. The EB gap interval bounds the size of a disparity; it does not detect one (its lower end "
+             "is often 0): use the Wilson/Holm above-target lists for detection. "
+             "'Holm' = exact one-sided binomial test of rate > target, Holm-corrected within each attribute (low power "
+             "at ~1% FPR: an empty list is not evidence of parity). 'EB' = empirical-Bayes shrunk rates, which damp "
+             "the upward bias of max-min over noisy groups; prefer the EB gap for disparity claims. Ratios are omitted "
+             "when the lowest group has < 5 events.", ""]
     for label, rep in zip(labels, reports):
         lines += render_input(label, rep)
     if len(reports) > 1:

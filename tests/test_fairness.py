@@ -43,8 +43,9 @@ def test_disparity_summary():
     assert s["gap"] == pytest.approx(0.15) and s["ratio"] is None
     assert "hi" in s["above_target_ci"] and "mid" not in s["above_target_ci"]
     assert {"hi", "mid"} <= set(s["above_target_point"])
-    s2 = disparity_summary({"hi": _row(30, 200), "mid": _row(3, 200)}, target=None)
-    assert s2["ratio"] == pytest.approx(10.0) and s2["above_target_point"] is None and s2["above_target_ci"] is None
+    s2 = disparity_summary({"hi": _row(30, 200), "mid": _row(6, 200)}, target=None)
+    assert s2["ratio"] == pytest.approx(5.0) and s2["above_target_point"] is None and s2["above_target_ci"] is None
+    assert disparity_summary({"hi": _row(30, 200), "mid": _row(3, 200)}, target=None)["ratio"] is None  # k < 5
     assert disparity_summary({"tiny": _row(1, 5)}, 0.01)["max_group"] is None
 
 
@@ -142,3 +143,26 @@ def test_disparity_summary_holm_and_gap_ci():
     assert 0 <= lo <= s["gap"] <= hi
     assert disparity_summary({"hi": _row(30, 200)}, target=0.01)["gap_ci"] is None
     assert disparity_summary(table, target=None)["above_target_holm"] is None
+
+
+def test_eb_shrink_pools_noise_and_keeps_real_spread():
+    from dfd.eval.fairness import eb_shrink
+
+    same = {g: _row(k, 500) for g, k in zip("abcdef", (4, 5, 6, 5, 4, 6))}  # pure binomial noise around 1%
+    assert len(set(eb_shrink(same).values())) == 1
+    s = disparity_summary(same, target=0.01, min_n=100)
+    assert s["gap_eb"] == pytest.approx(0.0) and s["gap"] > 0
+    spread = {"lo": _row(5, 1000), "mid": _row(20, 1000), "hi": _row(60, 1000)}
+    eb = eb_shrink(spread)
+    assert eb["lo"] < eb["mid"] < eb["hi"] and eb["lo"] >= 0.005 and eb["hi"] <= 0.06
+    s = disparity_summary(spread, target=0.01)
+    assert 0 < s["gap_eb"] <= s["gap"] and s["gap_eb_ci"][0] <= s["gap_eb"] <= s["gap_eb_ci"][1]
+
+
+def test_fairness_report_age3_intersection():
+    rep = fairness_report(["fake", "real", "abstain", "real"],
+                          {"race": ["A", "A", "B", "B"], "gender": ["M", "F", "M", "F"],
+                           "age": ["3-9", "20-29", "more than 70", "odd"]}, target_fpr=0.01, min_n=1)
+    attrs = rep["attributes"]
+    assert set(attrs["age3"]["fpr"]["table"]) == {"young", "adult", "senior", "odd"}
+    assert set(attrs["race|gender|age3"]["fpr"]["table"]) == {"A|M|young", "A|F|adult", "B|M|senior", "B|F|odd"}

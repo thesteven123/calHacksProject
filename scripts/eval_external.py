@@ -136,7 +136,8 @@ def _print_fairness(fair: dict) -> None:
             continue
         w = t[s["max_group"]]
         print(f"[fairness] {attr}: worst FPR {s['max_group']} {w['rate']:.4f} [{w['ci_low']:.4f}, {w['ci_high']:.4f}] "
-              f"n={w['n']} | gap={s['gap']:.4f} CI={_fmt_ci(s['gap_ci'])} | above target {fair['target_fpr']}: "
+              f"n={w['n']} | gap={s['gap']:.4f} (EB {s['gap_eb']:.4f} CI={_fmt_ci(s['gap_eb_ci'])}) "
+              f"| above target {fair['target_fpr']}: "
               f"Wilson {s['above_target_ci'] or 'none'}, Holm {s['above_target_holm'] or 'none'}")
 
 
