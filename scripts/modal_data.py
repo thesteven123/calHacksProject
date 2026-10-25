@@ -246,7 +246,8 @@ def report_volume() -> dict:
 
 @app.function(gpu="L4", cpu=8.0, memory=32768, timeout=2 * 3600, image=gpu_image,
               volumes={"/data": data_vol, "/runs": runs_vol, "/cache": hf_cache}, secrets=_hf_secret())
-def eval_external(dataset: str, checkpoint: str, frames_per_clip: int, max_per_generator: int | None) -> dict:
+def eval_external(dataset: str, checkpoint: str, frames_per_clip: int, max_per_generator: int | None,
+                  sfhq_split: str = "all") -> dict:
     import subprocess
 
     t0 = time.time()
@@ -256,6 +257,8 @@ def eval_external(dataset: str, checkpoint: str, frames_per_clip: int, max_per_g
            "--frames-per-clip", str(frames_per_clip), "--num-workers", "6"]
     if max_per_generator:
         cmd += ["--max-per-generator", str(max_per_generator)]
+    if dataset == "sfhq_t2i":
+        cmd += ["--sfhq-split", sfhq_split]
     proc = subprocess.run(cmd, capture_output=True, text=True)
     runs_vol.commit()
     return {"dataset": dataset, "checkpoint": checkpoint, "returncode": proc.returncode,
@@ -291,7 +294,8 @@ def _run_checkpoints(run_tag: str) -> list[str]:
 @app.local_entrypoint()
 def main(action: str = "plan", dataset: str = "all", generators: str = "", train_shards: int = 4,
          smoke: bool = False, checkpoint: str = "", frames_per_clip: int = 8,
-         max_per_generator: int = 2000, tag: str = "", run_tag: str = "", alphas: str = "0.05,0.10"):
+         max_per_generator: int = 2000, tag: str = "", run_tag: str = "", alphas: str = "0.05,0.10",
+         sfhq_split: str = "all"):
     gens = tuple(g for g in generators.split(",") if g)
     if action == "plan":
         _plan(dataset, gens, train_shards, smoke)
@@ -335,7 +339,7 @@ def main(action: str = "plan", dataset: str = "all", generators: str = "", train
         local.mkdir(parents=True, exist_ok=True)
         failed = []
         for name in names:
-            r = eval_external.remote(name, checkpoint, frames_per_clip, max_per_generator or None)
+            r = eval_external.remote(name, checkpoint, frames_per_clip, max_per_generator or None, sfhq_split)
             (local / f"eval_{name}.json").write_text(json.dumps(r, indent=2))
             print(f"[eval] {name}: rc={r['returncode']} ~${r['est_cost_usd']:.2f} -> {local / f'eval_{name}.json'}")
             if r["returncode"] != 0:

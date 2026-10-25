@@ -21,6 +21,8 @@ from PIL import Image
 from torch.utils.data import Dataset
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
+FACE_ALIGN_SIZE = 384  # face-pipeline alignment shared by DeepFakeFace and SFHQ-T2I rows
+FACE_JPEG_QUALITY = (85, 95)
 
 
 class CompositeDataset(Dataset):
@@ -100,8 +102,8 @@ class DeepFakeFaceDataset(Dataset):
         split: str = "all",  # "all" | "train" | "val"
         val_frac: float = 0.2,
         format_align: bool = True,
-        target_size: int = 384,
-        quality_range: tuple[int, int] = (85, 95),
+        target_size: int = FACE_ALIGN_SIZE,
+        quality_range: tuple[int, int] = FACE_JPEG_QUALITY,
         seed: int = 0,
         max_samples: int | None = None,
         download: bool = False,

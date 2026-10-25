@@ -2,6 +2,7 @@
 
     python scripts/eval_external.py --dataset wilddeepfake --checkpoint /runs/<run>/best.pt
     python scripts/eval_external.py --dataset sfhq_t2i --checkpoint best.pt --max-per-generator 2000
+    python scripts/eval_external.py --dataset sfhq_t2i --checkpoint best.pt --sfhq-split val
 
 Reuses DetectionPipeline's model, eval transform, and calibration so preprocessing is identical to
 deployment; nothing is fit or saved. WildDeepfake reports frame- and clip-level metrics plus calibrated
@@ -108,6 +109,8 @@ def main() -> None:
     ap.add_argument("--data-root", default="/data")
     ap.add_argument("--frames-per-clip", type=int, default=8)
     ap.add_argument("--max-per-generator", type=int, default=None)
+    ap.add_argument("--sfhq-split", choices=["all", "train", "val"], default="all",
+                    help="SFHQ-T2I md5 split (train/val match the face_t2i training split; all = whole zip)")
     ap.add_argument("--batch-size", type=int, default=64)
     ap.add_argument("--num-workers", type=int, default=4)
     ap.add_argument("--device", default="auto")
@@ -121,10 +124,12 @@ def main() -> None:
         report = _eval_wilddeepfake(pipe, ds, args.batch_size, args.num_workers)
     else:
         ds = SFHQT2IDataset(root / "sfhq_t2i" / "SyntheticFacesHighQuality-T2I.zip",
-                            max_per_generator=args.max_per_generator)
+                            max_per_generator=args.max_per_generator,
+                            split=None if args.sfhq_split == "all" else args.sfhq_split)
         report = _eval_sfhq(pipe, ds, args.batch_size, args.num_workers)
 
     report = {"dataset": args.dataset, "checkpoint": args.checkpoint, "n_items": len(ds),
+              **({"sfhq_split": args.sfhq_split} if args.dataset == "sfhq_t2i" else {}),
               "calibration": {"method": pipe.cal.method, "status": pipe.calibration_status,
                               "crop_mode": pipe.cal.crop_mode,
                               "tau_fake": pipe.cal.tau_fake, "tau_real": pipe.cal.tau_real},
