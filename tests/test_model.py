@@ -113,3 +113,19 @@ def test_checkpoint_load_refuses_arbitrary_pickled_objects(tmp_path):
         DeepfakeDetector.load(tmp_path / "evil.pt")
     assert not marker.exists()
     DeepfakeDetector.load(tmp_path / "ok.pt")  # legitimate checkpoints still load
+
+
+def test_warm_start_loads_matching_lora_and_head_not_temporal(tmp_path):
+    src = DeepfakeDetector(ModelConfig(**TINY, temporal=True, temporal_dim=16))
+    with torch.no_grad():
+        for p in src.parameters():
+            p.add_(0.5)
+    src.save(tmp_path / "src.pt")
+    dst = DeepfakeDetector(ModelConfig(**{**TINY, "beauty_head": False}, temporal=True, temporal_dim=16))
+    temporal_before = {k: v.clone() for k, v in dst.state_dict().items() if k.startswith("temporal.")}
+    ws = dst.warm_start(tmp_path / "src.pt")
+    sd, ref = dst.state_dict(), src.state_dict()
+    assert ws["loaded"] and all(torch.equal(sd[k], ref[k]) for k in ws["loaded"])
+    assert any("lora_" in k for k in ws["loaded"]) and any(k.startswith("head.encoder") for k in ws["loaded"])
+    assert "head.beauty.weight" in ws["not_in_model"] and ws["temporal_skipped"]
+    assert all(torch.equal(sd[k], v) for k, v in temporal_before.items())

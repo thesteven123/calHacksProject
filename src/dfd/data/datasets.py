@@ -414,12 +414,45 @@ def _wdf_val_group(video_group: str, fraction: float) -> bool:
     return int(hashlib.md5(video_group.encode("utf-8")).hexdigest()[:8], 16) / 2**32 < fraction
 
 
+def cap_fakes_per_group(clips: list[dict], max_ratio: float, seed: int = 0) -> list[dict]:
+    """Keep all reals; cap fakes to the largest uniform per-video_group count k with total fakes <= max_ratio x
+    reals. Which fakes survive is seeded per group (md5(group) + seed), so the result is deterministic."""
+    reals = [c for c in clips if c["label"] == 0]
+    fakes: dict[str, list[dict]] = {}
+    for c in clips:
+        if c["label"] == 1:
+            fakes.setdefault(c["video_group"], []).append(c)
+    budget = int(max_ratio * len(reals))
+    if sum(map(len, fakes.values())) <= budget:
+        return list(clips)
+    sizes = sorted(len(v) for v in fakes.values())
+    k = 0
+    while k < sizes[-1] and sum(min(n, k + 1) for n in sizes) <= budget:
+        k += 1
+    kept = []
+    for g, items in sorted(fakes.items()):
+        items = sorted(items, key=lambda c: c["clip_id"])
+        rng = np.random.default_rng([seed, int(hashlib.md5(g.encode()).hexdigest()[:8], 16)])
+        kept += [items[i] for i in sorted(rng.permutation(len(items))[:k])]
+    return reals + kept
+
+
+def source_class_counts(clips: list[dict]) -> dict[str, dict[str, int]]:
+    out: dict[str, dict[str, int]] = {}
+    for c in clips:
+        d = out.setdefault(c["source"], {"real": 0, "fake": 0})
+        d["fake" if c["label"] else "real"] += 1
+    return out
+
+
 def _wdf_extra_splits(cfg: DataConfig) -> dict[str, Dataset]:
-    """wdf_test = official WildDeepfake test clips; thb_cross = THB test fakes + CelebV-HQ test reals (if present)."""
+    """wdf_test = official WildDeepfake test clips; celebdf_test = official Celeb-DF v2 test list; thb_cross = THB
+    test fakes + CelebV-HQ test reals. Each is added only if its clips exist."""
     from dfd.data.video import VideoClipDataset
 
     clips = _video_clips(cfg)
     parts = {"wdf_test": [c for c in clips if c["source"] == "wdf" and c["split"] == "test"],
+             "celebdf_test": [c for c in clips if c["source"] == "celebdf" and c["split"] == "test"],
              "thb_cross": [c for c in clips if c["source"] in ("thb", "celebvhq") and c["split"] == "test"]}
     return {k: VideoClipDataset(cfg.video_frames_root, v) for k, v in parts.items() if v}
 
@@ -542,11 +575,18 @@ def build_base_datasets(cfg: DataConfig, seed: int = 0) -> tuple[Dataset, Datase
     if cfg.source == "video_wdf":
         from dfd.data.video import VideoClipDataset
 
-        # Official WildDeepfake train/test are video-disjoint; validation holds out whole train videos.
-        wdf_train = [c for c in _video_clips(cfg) if c["source"] == "wdf" and c["split"] == "train"]
-        held = [_wdf_val_group(c["video_group"], cfg.video_val_fraction) for c in wdf_train]
-        return (VideoClipDataset(cfg.video_frames_root, [c for c, h in zip(wdf_train, held) if not h]),
-                VideoClipDataset(cfg.video_frames_root, [c for c, h in zip(wdf_train, held) if h]))
+        # Official WildDeepfake train/test are video-disjoint; validation holds out whole train videos (Celeb-DF:
+        # whole target identities) of every source in video_train_sources.
+        train = [c for c in _video_clips(cfg) if c["source"] in cfg.video_train_sources and c["split"] == "train"]
+        celeb = [c for c in train if c["source"] == "celebdf"]
+        if celeb:  # ~6:1 fake:real; uncapped it skews training and calibration toward "Celeb-DF look = fake"
+            train = [c for c in train if c["source"] != "celebdf"] + cap_fakes_per_group(
+                celeb, cfg.video_celebdf_max_fake_ratio, seed)
+        held = [_wdf_val_group(c["video_group"], cfg.video_val_fraction) for c in train]
+        fit = [c for c, h in zip(train, held) if not h]
+        val = [c for c, h in zip(train, held) if h]
+        print(f"[data] per-source class counts: train={source_class_counts(fit)} val={source_class_counts(val)}")
+        return VideoClipDataset(cfg.video_frames_root, fit), VideoClipDataset(cfg.video_frames_root, val)
     if cfg.source == "genimage_arrow":
         from dfd.data.external import GENIMAGE_DIRS, GenImageArrowDataset
 

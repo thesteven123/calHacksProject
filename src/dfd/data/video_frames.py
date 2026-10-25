@@ -95,10 +95,51 @@ def extract_wdf_frames(root: str | Path, frames: list[dict], size: int = 256, qu
     return out
 
 
+YUNET_URL = ("https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/"
+             "face_detection_yunet_2023mar.onnx")  # MIT licence; same model as serve/ (dfd.inference.router)
+_YUNET: dict[tuple[str, int], object] = {}
+
+
+def yunet(onnx_path: str | Path, score_threshold: float = 0.8):
+    """Per-process cached cv2.FaceDetectorYN (cv2 objects cannot be pickled to pool workers)."""
+    import os
+
+    key = (str(onnx_path), os.getpid())
+    if key not in _YUNET:
+        _YUNET[key] = cv2.FaceDetectorYN.create(str(onnx_path), "", (320, 320), score_threshold)
+    return _YUNET[key]
+
+
+def largest_face(detector, frame_bgr: np.ndarray) -> list[int] | None:
+    """[x, y, w, h] of the largest detected face in original pixels, or None."""
+    h, w = frame_bgr.shape[:2]
+    detector.setInputSize((w, h))
+    _, faces = detector.detect(frame_bgr)
+    if faces is None or len(faces) == 0:
+        return None
+    x, y, bw, bh = max(faces, key=lambda f: float(f[2]) * float(f[3]))[:4]
+    return [int(round(float(v))) for v in (x, y, bw, bh)]
+
+
+def face_square_crop(frame: np.ndarray, box: list[int], scale: float = 1.3) -> np.ndarray:
+    """Square crop centred on the box with side max(w, h) * scale, shifted (not padded) to stay inside the frame."""
+    h, w = frame.shape[:2]
+    x, y, bw, bh = box
+    side = min(int(round(max(bw, bh) * scale)), h, w)
+    cx, cy = x + bw / 2, y + bh / 2
+    left = int(round(min(max(cx - side / 2, 0), w - side)))
+    top = int(round(min(max(cy - side / 2, 0), h - side)))
+    return frame[top:top + side, left:left + side]
+
+
 def extract_clip_frames(path: str | Path, timestamps: list[float], size: int = 256, quality: int = 95,
-                        fps: float | None = None) -> list[bytes]:
+                        fps: float | None = None, face_onnx: str | Path | None = None,
+                        stats: dict | None = None) -> list[bytes]:
     """JPEG bytes of the frames at `timestamps` (frame index = floor(t * fps), decoded sequentially, which is
-    more reliable than container seeking). One output per timestamp; raises on an unreadable clip."""
+    more reliable than container seeking). One output per timestamp; raises on an unreadable clip.
+
+    face_onnx: crop each frame to the largest YuNet face (x1.3 square) before the shared alignment; frames without
+    a face fall back to the centre crop and are counted in stats["face_fallback"]."""
     cap = cv2.VideoCapture(str(path))
     try:
         if not cap.isOpened():
@@ -121,7 +162,18 @@ def extract_clip_frames(path: str | Path, timestamps: list[float], size: int = 2
     if last is None:
         raise IOError(f"No decodable frames in {path}")
     # Indices past the decodable end (metadata overcount) fall back to the last decoded frame.
-    return [encode_aligned(frames.get(i, last), size, quality) for i in wanted]
+    picked = [frames.get(i, last) for i in wanted]
+    if face_onnx:
+        det, fallback = yunet(face_onnx), 0
+        for k, frame in enumerate(picked):
+            box = largest_face(det, frame)
+            if box is None:
+                fallback += 1
+            else:
+                picked[k] = face_square_crop(frame, box)
+        if stats is not None:
+            stats["face_fallback"] = stats.get("face_fallback", 0) + fallback
+    return [encode_aligned(f, size, quality) for f in picked]
 
 
 def extract_clip_job(job: tuple[dict, float, int, int, int]) -> tuple[dict, list[bytes] | None, str | None]:
@@ -135,11 +187,14 @@ def extract_clip_job(job: tuple[dict, float, int, int, int]) -> tuple[dict, list
             meta["n_frames"] = len(frames)
             return meta, frames, None
         info = probe_video(clip["path"])
+        stats: dict = {}
         frames = extract_clip_frames(clip["path"], video_timestamps(info["duration_s"], fps_sample, max_frames),
-                                     size, quality, fps=info["fps"])
-        meta = {k: v for k, v in clip.items() if k != "path"}
+                                     size, quality, fps=info["fps"], face_onnx=clip.get("face_onnx"), stats=stats)
+        meta = {k: v for k, v in clip.items() if k not in ("path", "face_onnx")}
         meta.update(n_frames=len(frames), duration_s=round(info["duration_s"], 3), src_fps=round(info["fps"], 3),
                     src_size=[info["width"], info["height"]])
+        if clip.get("face_onnx"):
+            meta["face_fallback_frames"] = stats.get("face_fallback", 0)
         return meta, frames, None
     except Exception as e:  # noqa: BLE001 - counted and logged by the caller; extraction continues
         return clip, None, f"{type(e).__name__}: {e}"
