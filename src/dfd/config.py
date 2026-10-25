@@ -27,6 +27,7 @@ class ModelConfig:
     temporal_kernels: tuple[int, ...] = (3, 5)
     topk_frac: float = 0.25
     image_size: int = 224
+    patch_pool: str = "mean"  # per-layer patch-token pooling: "mean" | "attn_mil" (gated attention-MIL)
 
 
 @dataclass

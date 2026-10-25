@@ -129,3 +129,27 @@ def test_warm_start_loads_matching_lora_and_head_not_temporal(tmp_path):
     assert any("lora_" in k for k in ws["loaded"]) and any(k.startswith("head.encoder") for k in ws["loaded"])
     assert "head.beauty.weight" in ws["not_in_model"] and ws["temporal_skipped"]
     assert all(torch.equal(sd[k], v) for k, v in temporal_before.items())
+
+
+def test_attn_mil_starts_as_mean_pool_and_round_trips(tmp_path):
+    torch.manual_seed(0)
+    base = DeepfakeDetector(ModelConfig(**TINY)).eval()
+    mil = DeepfakeDetector(ModelConfig(**TINY, patch_pool="attn_mil")).eval()
+    mil.load_state_dict(base.state_dict(), strict=False)  # same backbone + head; pool scorer is zero-initialised
+    x = torch.rand(2, 3, 56, 56)
+    assert torch.allclose(base.backbone(x), mil.backbone(x), atol=1e-6)
+    assert any(".patch_pool." in n for n, _ in mil.named_parameters()) and mil.param_groups()["head"]
+    with torch.no_grad():
+        for p in mil.backbone.patch_pool.parameters():
+            p.add_(0.3)
+    assert not torch.allclose(base.backbone(x), mil.backbone(x), atol=1e-4)
+    mil.save(tmp_path / "m.pt")
+    loaded, _ = DeepfakeDetector.load(tmp_path / "m.pt")
+    assert torch.allclose(loaded.eval().backbone(x), mil.backbone(x), atol=1e-6)
+
+
+def test_saved_state_keeps_patch_pool_for_pretrained_backbones():
+    from dfd.models.detector import _trained
+
+    assert _trained("backbone.patch_pool.0.v.weight") and _trained("backbone.model.encoder.layer.0.attention.lora_A")
+    assert not _trained("backbone.model.embeddings.patch_embeddings.projection.weight") and _trained("head.classifier.weight")

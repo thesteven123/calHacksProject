@@ -2,6 +2,8 @@
 
     .venv/bin/modal run --detach scripts/modal_video_diag.py --run-dir /runs/video_v2/config --tag video_v2_diag
     .venv/bin/modal run scripts/modal_video_diag.py --mode index --tag video_v2_diag     # CPU: validate frame store
+    .venv/bin/modal run --detach scripts/modal_video_diag.py --mode eval --run-dir /runs/video_v2b_r2/config \
+        --split celebdf_test --tag video_v2b_r2_celebdf                                  # report-only eval
 
 (a) frame sanity: decode random train clips from the frame tars; per-frame mean/std, within-clip and cross-clip
     pixel differences, label balance per split.
@@ -240,6 +242,53 @@ def check_index(root: str) -> dict:
     return out
 
 
+def eval_extra_split(run_dir: str, split: str, num_workers: int = 6, device: str = "auto") -> dict:
+    """Score one extra split exactly like train.py's evaluate_extra_splits (same transform, seed + 3, frames per
+    clip) with the run's own saved calibration.json. Report-only: nothing is fit or selected."""
+    import numpy as np
+    from torch.utils.data import DataLoader
+
+    from dfd.config import Config
+    from dfd.data.datasets import TransformedDataset, build_base_datasets
+    from dfd.data.transforms import DetectorTransform
+    from dfd.eval.calibration import Calibration
+    from dfd.eval.extra import extra_eval_splits, verdict_rates
+    from dfd.eval.metrics import sliced_report
+    from dfd.models.detector import DeepfakeDetector
+    from dfd.training.trainer import predict, resolve_device
+
+    run = Path(run_dir)
+    cfg = Config.from_yaml(run / "config.yaml")
+    _, base_val = build_base_datasets(cfg.data, cfg.train.seed)
+    splits = extra_eval_splits(cfg.data, base_val, cfg.train.seed)
+    if split not in splits:
+        raise SystemExit(f"split {split!r} not available; have {sorted(splits)}")
+    dev = resolve_device(device)
+    model, _ = DeepfakeDetector.load(run / "best.pt")
+    model.to(dev).eval()
+    tds = TransformedDataset(splits[split], DetectorTransform(cfg.data.pte, cfg.model.image_size, train=False),
+                             cfg.train.seed + 3, cfg.data.video_frames_per_clip)
+    preds = predict(model, DataLoader(tds, batch_size=cfg.train.batch_size, num_workers=num_workers, shuffle=False),
+                    dev)
+    cal = Calibration.load(run / "calibration.json")
+    return {"run_dir": str(run), "split": split, "n": len(tds),
+            "report": sliced_report(preds["labels"], preds["logits"], preds["generators"], preds["severities"]),
+            "verdicts": {cal.method: verdict_rates(cal, np.asarray(preds["logits"]), preds["labels"], split)}}
+
+
+@app.function(gpu=GPU, cpu=CPU, memory=MEM_MB, timeout=TIMEOUT_S,
+              volumes={"/cache": hf_cache, "/runs": runs_vol, "/data": data_vol})
+def run_eval_split(run_dir: str, split: str, out_dir: str) -> dict:
+    t0 = time.time()
+    r = eval_extra_split(run_dir, split)
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    (out / f"eval_{split}.json").write_text(json.dumps(r, indent=2))
+    runs_vol.commit()
+    r["est_cost_usd"] = round((time.time() - t0) * PRICE_PER_S, 3)
+    return r
+
+
 @app.function(cpu=2.0, memory=4096, timeout=1800, volumes={"/data": data_vol})
 def run_check_index(root: str) -> dict:
     return check_index(root)
@@ -260,7 +309,7 @@ def run_diag(run_dir: str, out_dir: str, n_probe: int) -> dict:
 
 @app.local_entrypoint()
 def main(run_dir: str = "/runs/video_v2/config", tag: str = "video_v2_diag", n_probe: int = 1000,
-         mode: str = "diag"):
+         mode: str = "diag", split: str = "celebdf_test"):
     if mode == "index":  # CPU-only validation of the frame store (read-only)
         r = run_check_index.remote("/data/video_frames")
         local = PROJECT / "runs" / "modal" / tag
@@ -269,6 +318,17 @@ def main(run_dir: str = "/runs/video_v2/config", tag: str = "video_v2_diag", n_p
         print(json.dumps({k: r[k] for k in ("n_entries", "n_clips", "files", "clips_missing_frames")}, indent=1))
         print({t: (v["n"], v["n_bad"]) for t, v in r["tars"].items()})
         print(f"[index] -> {local / 'index_check.json'}")
+        return
+    if mode == "eval":  # report-only scoring of one extra split with the run's own calibration
+        out_dir = f"/runs/{tag}"
+        if out_dir.rstrip("/") == str(Path(run_dir).parent).rstrip("/"):
+            raise SystemExit("--tag must name a NEW directory, not the run's own")
+        r = run_eval_split.remote(run_dir, split, out_dir)
+        local = PROJECT / "runs" / "modal" / tag
+        local.mkdir(parents=True, exist_ok=True)
+        (local / f"eval_{split}.json").write_text(json.dumps(r, indent=2))
+        print(json.dumps({"overall": r["report"]["overall"], "verdicts": r["verdicts"], "cost": r["est_cost_usd"]},
+                         indent=1))
         return
     out_dir = f"/runs/{tag}"
     if out_dir.rstrip("/") == str(Path(run_dir).parent).rstrip("/"):
