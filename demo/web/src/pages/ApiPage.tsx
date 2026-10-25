@@ -3,6 +3,9 @@ import { api } from '../api'
 import type { ModelsResponse } from '../types'
 import { AppShell } from '../components/AppShell'
 
+// Public Modal api host (no secret). Used when /api/models is unavailable.
+const PUBLIC_API_URL = 'https://thesteven123--dfd-demo-api.us-east.modal.run'
+
 const SAMPLE = `{
   "id": "3f2a9c1e-5b7d-4e8a-9c0f-1a2b3c4d5e6f",
   "media_type": "image",
@@ -52,7 +55,7 @@ export function ApiPage() {
       .catch(() => setError('Could not load model details.'))
   }, [])
 
-  const base = models?.api_url ?? 'https://<your-api-host>'
+  const base = models?.api_url || PUBLIC_API_URL
   const curl = `curl -H "Authorization: Bearer $DFD_API_KEY" -F file=@photo.jpg ${base}/v1/detect`
 
   return (
@@ -94,7 +97,7 @@ export function ApiPage() {
                 <h3 className="font-medium">{s.title}</h3>
                 <p className="text-xs text-neutral-500">Checkpoint {s.checkpoint} · Trained on {s.trained_on}</p>
                 <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-neutral-300">
-                  {s.limitations.map((l) => (
+                  {(Array.isArray(s.limitations) ? s.limitations : [s.limitations]).map((l) => (
                     <li key={l}>{l}</li>
                   ))}
                 </ul>

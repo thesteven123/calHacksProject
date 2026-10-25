@@ -56,7 +56,7 @@ export interface ModelInfo {
   checkpoint: string
   trained_on: string
   metrics: Record<string, unknown>
-  limitations: string[]
+  limitations: string | string[]
 }
 
 export interface ModelsResponse {
