@@ -1,6 +1,6 @@
 # DFD demo web
 
-Research demo UI for the deepfake detector: a playground (upload a file, get a verdict), a Spectra Guard feed (`/instagram`), a Reels feed (`/reels`), and an API page (`/api`). Stack: Vite, React, TypeScript, Tailwind, react-router.
+Research demo UI for the deepfake detector: a playground (upload a file, get a verdict), a Spectra Guard feed (`/instagram`), a Reels feed (`/reels`), and an API page (`/developers`). Stack: Vite, React, TypeScript, Tailwind, react-router.
 
 The UI only states what the detector returns: the verdict, the API's own `reasons`, and specialist scores. It is not for enforcement decisions.
 
