@@ -11,6 +11,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+from PIL import Image
 
 
 def video_timestamps(duration_s: float, fps_sample: float = 4.0, max_frames: int = 16) -> list[float]:
@@ -44,6 +45,55 @@ def square_resize(frame: np.ndarray, size: int) -> np.ndarray:
     return cv2.resize(frame[top:top + c, left:left + c], (size, size), interpolation=cv2.INTER_AREA)
 
 
+def encode_aligned(frame_bgr: np.ndarray, size: int = 256, quality: int = 95) -> bytes:
+    """The shared per-frame alignment: centre square crop -> size x size INTER_AREA -> JPEG (cv2) bytes."""
+    ok, buf = cv2.imencode(".jpg", square_resize(frame_bgr, size), [cv2.IMWRITE_JPEG_QUALITY, quality])
+    if not ok:
+        raise IOError("JPEG encode failed")
+    return buf.tobytes()
+
+
+def align_frame(img: Image.Image, size: int = 256, quality: int = 95) -> Image.Image:
+    """PIL in/out version of the extractor's per-frame alignment (same cv2 path), e.g. for eval-time frames."""
+    bgr = cv2.cvtColor(np.asarray(img.convert("RGB")), cv2.COLOR_RGB2BGR)
+    data = np.frombuffer(encode_aligned(bgr, size, quality), np.uint8)
+    return Image.fromarray(cv2.cvtColor(cv2.imdecode(data, cv2.IMREAD_COLOR), cv2.COLOR_BGR2RGB))
+
+
+def wdf_clips(index: list[dict], split: str, max_frames: int = 16) -> list[dict]:
+    """WildDeepfake clips from an index_<split>.json: group by (kind, video, clip), sort by frame number and keep
+    up to max_frames entries evenly spaced over the sorted list (unique). `frames` holds the chosen index entries."""
+    by_clip: dict[tuple, list[dict]] = {}
+    for e in index:
+        by_clip.setdefault((e["label"], e["video"], e["clip"]), []).append(e)
+    clips = []
+    for (label, video, clip), entries in sorted(by_clip.items()):
+        entries = sorted(entries, key=lambda e: e["frame"])
+        picks = np.unique(np.linspace(0, len(entries) - 1, min(max_frames, len(entries))).round().astype(int))
+        kind = "real" if label == 0 else "fake"
+        clips.append({"clip_id": f"wdf_{kind}_{video}_{clip}", "source": "wdf",
+                      "method": "real" if label == 0 else "wilddeepfake", "split": split, "label": int(label),
+                      "video_group": f"wdf/{kind}/{video}", "frames": [entries[i] for i in picks]})
+    return clips
+
+
+def extract_wdf_frames(root: str | Path, frames: list[dict], size: int = 256, quality: int = 95) -> list[bytes]:
+    """Read PNG frames at their indexed tar offsets under `root` and align them like video frames."""
+    out, handles = [], {}
+    try:
+        for e in frames:
+            f = handles.setdefault(e["tar"], open(Path(root) / e["tar"], "rb"))
+            f.seek(e["offset"])
+            img = cv2.imdecode(np.frombuffer(f.read(e["size"]), np.uint8), cv2.IMREAD_COLOR)
+            if img is None:
+                raise IOError(f"Cannot decode {e['tar']}:{e['member']}")
+            out.append(encode_aligned(img, size, quality))
+    finally:
+        for f in handles.values():
+            f.close()
+    return out
+
+
 def extract_clip_frames(path: str | Path, timestamps: list[float], size: int = 256, quality: int = 95,
                         fps: float | None = None) -> list[bytes]:
     """JPEG bytes of the frames at `timestamps` (frame index = floor(t * fps), decoded sequentially, which is
@@ -69,13 +119,8 @@ def extract_clip_frames(path: str | Path, timestamps: list[float], size: int = 2
         cap.release()
     if last is None:
         raise IOError(f"No decodable frames in {path}")
-    out = []
-    for i in wanted:  # indices past the decodable end (metadata overcount) fall back to the last decoded frame
-        ok, buf = cv2.imencode(".jpg", square_resize(frames.get(i, last), size), [cv2.IMWRITE_JPEG_QUALITY, quality])
-        if not ok:
-            raise IOError(f"JPEG encode failed for {path} frame {i}")
-        out.append(buf.tobytes())
-    return out
+    # Indices past the decodable end (metadata overcount) fall back to the last decoded frame.
+    return [encode_aligned(frames.get(i, last), size, quality) for i in wanted]
 
 
 def extract_clip_job(job: tuple[dict, float, int, int, int]) -> tuple[dict, list[bytes] | None, str | None]:
@@ -83,6 +128,11 @@ def extract_clip_job(job: tuple[dict, float, int, int, int]) -> tuple[dict, list
     (clips.json metadata, JPEG frames, None) or (clip, None, error). Lives here so spawn-based pools can import it."""
     clip, fps_sample, max_frames, size, quality = job
     try:
+        if clip["source"] == "wdf":  # pre-extracted PNG frames: clip["frames"] index entries, clip["root"] tar dir
+            frames = extract_wdf_frames(clip["root"], clip["frames"], size, quality)
+            meta = {k: v for k, v in clip.items() if k not in ("frames", "root")}
+            meta["n_frames"] = len(frames)
+            return meta, frames, None
         info = probe_video(clip["path"])
         frames = extract_clip_frames(clip["path"], video_timestamps(info["duration_s"], fps_sample, max_frames),
                                      size, quality, fps=info["fps"])

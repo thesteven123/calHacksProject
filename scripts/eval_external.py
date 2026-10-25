@@ -24,6 +24,7 @@ import torch
 from torch.utils.data import DataLoader, Dataset
 
 from dfd.data.external import SFHQT2IDataset, WildDeepfakeDataset
+from dfd.data.video_frames import align_frame
 from dfd.eval.fairness import fairness_report
 from dfd.eval.metrics import binary_metrics
 from dfd.inference.pipeline import DetectionPipeline
@@ -157,7 +158,8 @@ class _ClipSequences(Dataset):
     def __getitem__(self, idx: int) -> dict:
         clip_id, rows = self.clips[idx]
         rows = rows[: self.t]
-        pixels = [self.transform(self.base[i][0], np.random.default_rng(idx))[0] for i in rows]
+        # align_frame = the training extractor's per-frame alignment (256 square, INTER_AREA, JPEG q95).
+        pixels = [self.transform(align_frame(self.base[i][0]), np.random.default_rng(idx))[0] for i in rows]
         mask = [True] * len(pixels) + [False] * (self.t - len(pixels))
         pixels += [pixels[-1]] * (self.t - len(pixels))
         return {"pixels": torch.stack(pixels), "mask": torch.tensor(mask), "label": self.base.meta(rows[0])[0],

@@ -8,12 +8,14 @@
     .venv/bin/modal run scripts/modal_data.py --action ood --run-tag full7_dinov2_conformal   # OOD-gate experiment
     .venv/bin/modal run scripts/modal_data.py --action ingest --dataset thb        # then --dataset celebvhq
     .venv/bin/modal run scripts/modal_data.py --action frames                      # -> /data/video_frames
+    .venv/bin/modal run scripts/modal_data.py --action ingest --dataset wilddeepfake_train
+    .venv/bin/modal run scripts/modal_data.py --action frames --video-sources wdf  # merges WildDeepfake clips
 
 Volume layout: /data/genimage/data/<split>/<DIR>/..., /data/wilddeepfake/deepfake_in_the_wild/... (+index_test.json),
 /data/sfhq_t2i/SyntheticFacesHighQuality-T2I.zip, /data/ffhq/<NNNNN>.tar (+index.json),
 /data/thb/{fake/<method>/<split>/*.mp4, real/*.json}, /data/celebvhq/{videos.tar, clips/<clip>.mp4},
 /data/video_frames/<source>_<split>.tar (+index.json, clips.json).
-Each dataset dir gets MANIFEST.json with the pinned revision sha.
+Each dataset dir gets MANIFEST.json with the pinned revision sha (MANIFEST_<key>.json when keys share a dir).
 `plan` runs fully locally (HfApi metadata only) — no Modal compute is spawned.
 """
 
@@ -32,6 +34,7 @@ REMOTE = "/root/project"
 DATASETS = {
     "genimage": {"repo": "nebula/GenImage-arrow", "licence": "CC-BY-NC-SA-4.0", "dest": "/data/genimage"},
     "wilddeepfake": {"repo": "xingjunm/WildDeepfake", "licence": "Apache-2.0", "dest": "/data/wilddeepfake"},
+    "wilddeepfake_train": {"repo": "xingjunm/WildDeepfake", "licence": "Apache-2.0", "dest": "/data/wilddeepfake"},
     "sfhq_t2i": {"repo": "bitmind/SyntheticFacesHQ", "licence": "MIT", "dest": "/data/sfhq_t2i"},
     "ffhq": {"repo": "gaunernst/ffhq-1024-wds", "licence": "CC-BY-NC-SA-4.0", "dest": "/data/ffhq"},
     "thb": {"repo": "luchaoqi/TalkingHeadBench", "licence": "MIT", "dest": "/data/thb"},
@@ -44,6 +47,9 @@ _THB_REAL_JSON = re.compile(r"^real/[^/]+\.json$")
 THB_SPLIT_JSON = "/data/thb/real/real_dataset_split.json"
 CELEBVHQ_FILES = ("videos.tar", "celebvhq_info.json")
 SFHQ_ZIP = "SyntheticFacesHighQuality-T2I.zip"
+# "--dataset all" skips opt-in large sets (WildDeepfake train split, +63 GB); request them by name.
+OPT_IN = ("wilddeepfake_train",)
+ALL_DATASETS = [k for k in DATASETS if k not in OPT_IN]
 EVAL_DATASETS = ("wilddeepfake", "sfhq_t2i", "fairface")
 GENIMAGE_DIRS = {"ADM": "ADM", "BigGAN": "BigGAN", "GLIDE": "glide", "Midjourney": "Midjourney",
                  "SD14": "stable_diffusion_v_1_4", "SD15": "stable_diffusion_v_1_5", "VQDM": "VQDM",
@@ -107,6 +113,11 @@ def select_shards(n: int, k: int | None) -> list[int]:
     return sorted(set(int(i) for i in np.linspace(0, n - 1, k).round()))
 
 
+def manifest_name(dataset: str, dest: str | Path) -> str:
+    """MANIFEST.json when the dataset key equals its dest dir name, else MANIFEST_<key>.json (shared dest dirs)."""
+    return "MANIFEST.json" if Path(dest).name == dataset else f"MANIFEST_{dataset}.json"
+
+
 def plan_files(dataset: str, tree: list[tuple[str, int]], generators: tuple[str, ...] = (),
                train_shards: int = 4, smoke: bool = False, ffhq_shards: int = 15) -> list[tuple[str, int]]:
     """Pure file selection over a repo's (path, size_bytes) listing; unit-testable offline."""
@@ -123,8 +134,9 @@ def plan_files(dataset: str, tree: list[tuple[str, int]], generators: tuple[str,
                 meta = [p for p in leaf_files if p.endswith(".json")]
                 chosen = {shards[i] for i in select_shards(len(shards), k)} | set(meta)
                 out += [(p, s) for p, s in tree if p in chosen]
-    elif dataset == "wilddeepfake":
-        for kind in ("real_test", "fake_test"):
+    elif dataset in ("wilddeepfake", "wilddeepfake_train"):
+        split = "train" if dataset == "wilddeepfake_train" else "test"
+        for kind in (f"real_{split}", f"fake_{split}"):
             prefix = f"deepfake_in_the_wild/{kind}/"
             files = sorted((p, s) for p, s in tree if p.startswith(prefix))
             out += files[:1] if smoke else files
@@ -252,7 +264,7 @@ def _plan(dataset: str, generators: tuple[str, ...], train_shards: int, smoke: b
 
     api = HfApi()
     total = 0
-    for name in ([dataset] if dataset != "all" else list(DATASETS)):
+    for name in ([dataset] if dataset != "all" else ALL_DATASETS):
         spec = DATASETS[name]
         sha, tree, _ = _repo_tree(api, spec["repo"])
         files = plan_files(name, tree, generators, train_shards, smoke, ffhq_shards)
@@ -307,6 +319,10 @@ def ingest(dataset: str, files: list[tuple[str, int]], revision: str,
         from dfd.data.wilddeepfake_index import build_wilddeepfake_index, write_wilddeepfake_index
 
         write_wilddeepfake_index(dest, build_wilddeepfake_index(dest, split="test"), split="test")
+    if dataset == "wilddeepfake_train":
+        from dfd.data.wilddeepfake_index import build_wilddeepfake_index, write_wilddeepfake_index
+
+        write_wilddeepfake_index(dest, build_wilddeepfake_index(dest, split="train"), split="train")
     if dataset == "ffhq":
         from dfd.data.tar_index import build_image_tar_index, write_index
 
@@ -321,7 +337,7 @@ def ingest(dataset: str, files: list[tuple[str, int]], revision: str,
                 "selection": selection,
                 "files": [{"path": p, "size": s, "sha256": sha256s.get(p)} for p, s in files],
                 "created_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
-    (dest / "MANIFEST.json").write_text(json.dumps(manifest, indent=2))
+    (dest / manifest_name(dataset, dest)).write_text(json.dumps(manifest, indent=2))
     data_vol.commit()
     wall = time.time() - t0
     return {"dataset": dataset, "downloaded": downloaded, "reused": reused, "bytes": n_bytes,
@@ -333,12 +349,13 @@ FRAMES_PRICE_PER_S = FRAMES_CPU * 0.0000131 + (FRAMES_MEM_MB / 1024) * 0.0000022
 
 
 @app.function(cpu=FRAMES_CPU, memory=FRAMES_MEM_MB, timeout=4 * 3600, volumes={"/data": data_vol})
-def extract_frames(limit: int | None = None) -> dict:
+def extract_frames(limit: int | None = None, video_sources: str = "thb,celebvhq") -> dict:
     import subprocess
 
     t0 = time.time()
     cmd = ["python", f"{REMOTE}/scripts/extract_video_frames.py", "--thb-root", "/data/thb",
-           "--celebvhq-root", "/data/celebvhq", "--out", "/data/video_frames", "--workers", str(int(FRAMES_CPU))]
+           "--celebvhq-root", "/data/celebvhq", "--wdf-root", "/data/wilddeepfake", "--sources", video_sources,
+           "--out", "/data/video_frames", "--workers", str(int(FRAMES_CPU))]
     if limit:
         cmd += ["--limit", str(limit)]
     proc = subprocess.run(cmd, capture_output=True, text=True)
@@ -353,7 +370,7 @@ def report_volume() -> dict:
     out = {}
     for name, spec in DATASETS.items():
         dest = Path(spec["dest"])
-        mf = dest / "MANIFEST.json"
+        mf = dest / manifest_name(name, dest)
         out[name] = json.loads(mf.read_text()) if mf.exists() else {"missing": str(mf)}
     usage = {}
     for d in Path("/data").iterdir():
@@ -415,7 +432,7 @@ def _run_checkpoints(run_tag: str) -> list[str]:
 def main(action: str = "plan", dataset: str = "all", generators: str = "", train_shards: int = 4,
          smoke: bool = False, checkpoint: str = "", frames_per_clip: int = 8,
          max_per_generator: int = 2000, tag: str = "", run_tag: str = "", alphas: str = "0.05,0.10",
-         sfhq_split: str = "all", ffhq_shards: int = 15):
+         sfhq_split: str = "all", ffhq_shards: int = 15, video_sources: str = "thb,celebvhq"):
     gens = tuple(g for g in generators.split(",") if g)
     if action == "plan":
         _plan(dataset, gens, train_shards, smoke, ffhq_shards)
@@ -430,7 +447,7 @@ def main(action: str = "plan", dataset: str = "all", generators: str = "", train
         print(f"[report] /data usage: { {k: f'{v / 1e9:.1f} GB' for k, v in r['bytes_by_dir'].items()} }")
         return
     if action == "ingest":
-        names = [dataset] if dataset != "all" else list(DATASETS)
+        names = [dataset] if dataset != "all" else ALL_DATASETS
         unknown = [n for n in names if n not in DATASETS]
         if unknown:
             raise SystemExit(f"Unknown dataset(s) {unknown}; supported: {list(DATASETS)} or 'all'")
@@ -501,7 +518,7 @@ def main(action: str = "plan", dataset: str = "all", generators: str = "", train
             raise SystemExit(f"ood eval failed for {failed} (see {local})")
         return
     if action == "frames":
-        r = extract_frames.remote(24 if smoke else None)
+        r = extract_frames.remote(24 if smoke else None, video_sources)
         print(f"[frames] rc={r['returncode']} wall={r['wall_s'] / 60:.1f}min ~${r['est_cost_usd']:.2f}")
         print(r["log_tail"][-1500:])
         if r["returncode"] != 0:

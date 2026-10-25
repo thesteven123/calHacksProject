@@ -13,7 +13,8 @@ from pathlib import Path
 from PIL import Image
 from torch.utils.data import Dataset
 
-from dfd.data.video_frames import extract_clip_frames, probe_video, square_resize, video_timestamps  # noqa: F401
+from dfd.data.video_frames import (align_frame, extract_clip_frames, probe_video, square_resize,  # noqa: F401
+                                   video_timestamps)
 
 
 class VideoClipDataset(Dataset):
@@ -49,6 +50,11 @@ class VideoClipDataset(Dataset):
     def meta(self, idx: int) -> tuple[int, str]:
         c = self.clips[idx]
         return int(c["label"]), ("real" if int(c["label"]) == 0 else c["method"])
+
+    def group(self, idx: int) -> str:
+        """Split group: the clip's source video (video_group) when known, so clips of one video stay together."""
+        c = self.clips[idx]
+        return c.get("video_group") or c["clip_id"]
 
     def clip_id(self, idx: int) -> str:
         return self.clips[idx]["clip_id"]
