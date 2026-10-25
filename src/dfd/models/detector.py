@@ -15,6 +15,11 @@ from dfd.models.heads import VIBHead
 from dfd.models.temporal import TemporalAdapter, topk_pool
 
 
+def _trained(name: str) -> bool:
+    """Saved/required tensors: everything outside the frozen backbone, plus LoRA and patch-pool weights inside it."""
+    return not name.startswith("backbone.") or "lora_" in name or ".patch_pool." in name
+
+
 class DeepfakeDetector(nn.Module):
     def __init__(self, cfg: ModelConfig):
         super().__init__()
@@ -45,7 +50,7 @@ class DeepfakeDetector(nn.Module):
 
     def save(self, path: str | Path, extra: dict[str, Any] | None = None) -> None:
         full = self.cfg.backbone == "random-tiny"
-        state = {n: t for n, t in self.state_dict().items() if full or "lora_" in n or not n.startswith("backbone.")}
+        state = {n: t for n, t in self.state_dict().items() if full or _trained(n)}
         torch.save({"model_config": dataclasses.asdict(self.cfg), "state_dict": state, **(extra or {})}, path)
 
     def warm_start(self, path: str | Path) -> dict[str, list[str]]:
@@ -73,6 +78,6 @@ class DeepfakeDetector(nn.Module):
         ckpt = torch.load(path, map_location=map_location, weights_only=True)
         model = cls(from_dict(ModelConfig, ckpt["model_config"]))
         missing, unexpected = model.load_state_dict(ckpt["state_dict"], strict=False)
-        if unexpected or any(not k.startswith("backbone.") or "lora_" in k for k in missing):
+        if unexpected or any(_trained(k) for k in missing):
             raise RuntimeError(f"Checkpoint mismatch. missing={missing[:5]} unexpected={unexpected[:5]}")
         return model, ckpt

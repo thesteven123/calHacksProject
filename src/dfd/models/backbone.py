@@ -44,6 +44,22 @@ def _transformer_blocks(model: nn.Module) -> nn.ModuleList:
     raise ValueError(f"Cannot locate transformer blocks in {type(model).__name__}")
 
 
+class GatedAttentionPool(nn.Module):
+    """Gated attention-MIL pooling over tokens (Ilse et al., 2018). The scorer's output layer is zero-initialised,
+    so it starts as an exact mean pool."""
+
+    def __init__(self, dim: int, attn_dim: int = 128):
+        super().__init__()
+        self.v, self.u, self.w = nn.Linear(dim, attn_dim), nn.Linear(dim, attn_dim), nn.Linear(attn_dim, 1)
+        nn.init.zeros_(self.w.weight)
+        nn.init.zeros_(self.w.bias)
+
+    def forward(self, tokens: torch.Tensor) -> torch.Tensor:
+        """tokens [B, N, D] -> [B, D]"""
+        a = self.w(torch.tanh(self.v(tokens)) * torch.sigmoid(self.u(tokens))).softmax(dim=1)
+        return (a * tokens).sum(dim=1)
+
+
 class FoundationBackbone(nn.Module):
     """Input: RGB in [0, 1], shape [B, 3, H, W]. Output: [B, len(layers) * 2 * hidden]."""
 
@@ -64,6 +80,10 @@ class FoundationBackbone(nn.Module):
                 self.lora_count += inject_lora(block, cfg.lora_targets, cfg.lora_rank, cfg.lora_alpha)
             if self.lora_count == 0:
                 raise ValueError(f"No LoRA targets {cfg.lora_targets} found in {cfg.backbone}")
+        if cfg.patch_pool not in ("mean", "attn_mil"):
+            raise ValueError(f"Unknown patch_pool {cfg.patch_pool!r}")
+        self.patch_pool = (nn.ModuleList(GatedAttentionPool(self.hidden_size) for _ in self.layers)
+                           if cfg.patch_pool == "attn_mil" else None)
         self.register_buffer("mean", torch.tensor(IMAGENET_MEAN).view(1, 3, 1, 1), persistent=False)
         self.register_buffer("std", torch.tensor(IMAGENET_STD).view(1, 3, 1, 1), persistent=False)
 
@@ -76,10 +96,11 @@ class FoundationBackbone(nn.Module):
         with torch.set_grad_enabled(self.lora_count > 0 and torch.is_grad_enabled()):
             hidden = self.model(pixel_values=x, output_hidden_states=True).hidden_states
         feats = []
-        for i in self.layers:
+        for j, i in enumerate(self.layers):
             h = hidden[i]
             cls_tok = h[:, 0]
-            patch_mean = h[:, self.num_prefix_tokens :].mean(dim=1)
+            patches = h[:, self.num_prefix_tokens :]
+            patch_mean = patches.mean(dim=1) if self.patch_pool is None else self.patch_pool[j](patches)
             feats.append(F.layer_norm(cls_tok, (self.hidden_size,)))
             feats.append(F.layer_norm(patch_mean, (self.hidden_size,)))
         return torch.cat(feats, dim=-1)

@@ -71,6 +71,9 @@ def main() -> None:
               f"({ws['not_in_model'][:4]}), {len(ws['temporal_skipped'])} temporal")
     best = Trainer(model, cfg, train_loader, val_loader, test_loader, fit_loader).train()
 
+    if "test_preds" in best:  # per-sample test logits for paired comparisons (scripts/modal_ablation.py)
+        (out / "test_preds.json").write_text(json.dumps({k: best["test_preds"][k] for k in ("logits", "labels",
+                                                                                         "generators")}))
     # Calibrate on known generators, not either OOD generator.
     fit_preds = best.get("fit_preds", best["preds"])
     logits = np.asarray(fit_preds["logits"])
