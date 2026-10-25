@@ -690,7 +690,7 @@ Hallo / Hallo2, select on AniPortraitVideo, test on EmoPortrait. 2 epochs, L4, â
 |---|---|---|---|
 | Select: AniPortraitVideo (unseen) | 0.997 | 0.91 | â€“ |
 | Test: EmoPortrait (unseen) | 0.990 | 0.79 | 0.6% / 4.1% / 13% |
-| **WildDeepfake clips (806), clip-level, calibrated** | **0.60** | 0.00 | **real-clip FPR 53.5%**, fake FNR 2.7%, abstain 34% |
+| **WildDeepfake clips (806), clip-level, calibrated** | **0.60** | 0.0024 | **real-clip FPR 53.5%**, fake FNR 2.7%, abstain 34% |
 
 **Read-out:** the detector separates *this dataset pair* almost perfectly but has learned "not a CelebV-HQ-style
 512 px talking-head clip = fake". On in-the-wild face-swap clips (low-resolution 224 px crops, different capture
