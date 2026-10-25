@@ -39,7 +39,7 @@ def evaluate_extra_splits(model, cfg, base_val: Dataset, cals: dict, device,
     out: dict[str, dict[str, Any]] = {}
     for name, ds in extra_eval_splits(cfg.data, base_val, cfg.train.seed).items():
         tds = TransformedDataset(ds, DetectorTransform(cfg.data.pte, cfg.model.image_size, train=False),
-                                 cfg.train.seed + 3)
+                                 cfg.train.seed + 3, cfg.data.video_frames_per_clip)
         preds = predict(model, DataLoader(tds, shuffle=False, **loader_kw), device)
         out[name] = {
             "report": sliced_report(preds["labels"], preds["logits"], preds["generators"], preds["severities"]),

@@ -47,11 +47,11 @@ def main() -> None:
     else:
         base_sel, base_test = split_val_holdout(base_val, holdout, seed=cfg.train.seed)
         base_fit = base_sel
-    size = cfg.model.image_size
-    train_ds = TransformedDataset(base_train, DetectorTransform(cfg.data.pte, size, train=True), cfg.train.seed)
-    val_ds = TransformedDataset(base_sel, DetectorTransform(cfg.data.pte, size, train=False), cfg.train.seed + 1)
-    fit_ds = TransformedDataset(base_fit, DetectorTransform(cfg.data.pte, size, train=False), cfg.train.seed + 1)
-    test_ds = TransformedDataset(base_test, DetectorTransform(cfg.data.pte, size, train=False), cfg.train.seed + 2)
+    size, fpc = cfg.model.image_size, cfg.data.video_frames_per_clip
+    train_ds = TransformedDataset(base_train, DetectorTransform(cfg.data.pte, size, train=True), cfg.train.seed, fpc)
+    val_ds = TransformedDataset(base_sel, DetectorTransform(cfg.data.pte, size, train=False), cfg.train.seed + 1, fpc)
+    fit_ds = TransformedDataset(base_fit, DetectorTransform(cfg.data.pte, size, train=False), cfg.train.seed + 1, fpc)
+    test_ds = TransformedDataset(base_test, DetectorTransform(cfg.data.pte, size, train=False), cfg.train.seed + 2, fpc)
     loader_kw = dict(batch_size=cfg.train.batch_size, num_workers=cfg.data.num_workers,
                      persistent_workers=cfg.data.num_workers > 0)
     train_loader = DataLoader(train_ds, shuffle=True, drop_last=len(train_ds) > cfg.train.batch_size, **loader_kw)

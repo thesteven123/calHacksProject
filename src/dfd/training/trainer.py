@@ -41,7 +41,8 @@ def predict(model: DeepfakeDetector, loader: DataLoader, device: torch.device) -
     model.eval()
     out: dict[str, list] = {"logits": [], "labels": [], "generators": [], "severities": []}
     for batch in loader:
-        logits = model(batch["pixels"].to(device))["logit"].float().cpu()
+        mask = batch.get("mask")
+        logits = model(batch["pixels"].to(device), None if mask is None else mask.to(device))["logit"].float().cpu()
         out["logits"] += logits.tolist()
         out["labels"] += batch["label"].tolist()
         out["generators"] += list(batch["generator"])
@@ -105,8 +106,9 @@ class Trainer:
                 pixels = batch["pixels"].to(self.device, non_blocking=True)
                 labels = batch["label"].to(self.device)
                 beauty = batch["beauty"].to(self.device)
+                mask = batch.get("mask")
                 with self.autocast():
-                    out = self.model(pixels)
+                    out = self.model(pixels, None if mask is None else mask.to(self.device))
                 out = {k: v.float() for k, v in out.items()}
                 loss, logs = detector_loss(out, labels, self.beta(step), beauty, self.tc.beauty_weight)
                 self.optimizer.zero_grad(set_to_none=True)
