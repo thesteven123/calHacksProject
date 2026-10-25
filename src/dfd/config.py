@@ -83,6 +83,11 @@ class DataConfig:
     sowaiba_root: str | None = None
     sowaiba_val_fraction: float = 0.2
     sowaiba_eval: bool = False
+    sfhq_zip: str | None = None  # SFHQ-T2I zip; adds its fakes to source=paired_faces
+    sfhq_generators: tuple[str, ...] = ()  # empty = all 5
+    sfhq_val_fraction: float = 0.2
+    sfhq_max_per_generator_train: int | None = 8000
+    sfhq_max_per_generator_val: int | None = 1000
 
 
 @dataclass

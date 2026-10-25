@@ -12,7 +12,8 @@ from PIL import Image
 from torch.utils.data import Dataset
 
 from dfd.config import DataConfig
-from dfd.data.paired import CompositeDataset, DeepFakeFaceDataset, SowaibaDataset, verify_no_group_leakage
+from dfd.data.paired import (FACE_ALIGN_SIZE, FACE_JPEG_QUALITY, CompositeDataset, DeepFakeFaceDataset, SowaibaDataset,
+                             verify_no_group_leakage)
 from dfd.data.transforms import DetectorTransform
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
@@ -442,6 +443,17 @@ def build_base_datasets(cfg: DataConfig, seed: int = 0) -> tuple[Dataset, Datase
         )
         train_parts.append(dff_train)
         val_parts.append(dff_val)
+        if cfg.sfhq_zip:
+            if not cfg.dff_format_align:
+                raise ValueError("data.sfhq_zip requires data.dff_format_align: SFHQ alignment must match DFF")
+            from dfd.data.external import SFHQT2IDataset
+
+            sfhq_kw = dict(generators=tuple(cfg.sfhq_generators) or None, val_fraction=cfg.sfhq_val_fraction,
+                           align_size=FACE_ALIGN_SIZE, quality_range=FACE_JPEG_QUALITY, seed=seed)
+            train_parts.append(SFHQT2IDataset(cfg.sfhq_zip, split="train", exclude_generators=holdout,
+                                              max_per_generator=cfg.sfhq_max_per_generator_train, **sfhq_kw))
+            val_parts.append(SFHQT2IDataset(cfg.sfhq_zip, split="val",
+                                            max_per_generator=cfg.sfhq_max_per_generator_val, **sfhq_kw))
 
         train = CompositeDataset(train_parts) if len(train_parts) > 1 else train_parts[0]
         val = CompositeDataset(val_parts) if len(val_parts) > 1 else val_parts[0]

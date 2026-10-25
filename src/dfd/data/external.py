@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import re
@@ -191,13 +192,23 @@ SFHQ_GENERATORS = {"DALLE3": "DALLE3", "FLUX1_dev": "FLUX1-dev", "FLUX1_pro": "F
                    "FLUX1_schnell": "FLUX1-schnell", "SDXL": "SDXL"}
 
 
+def sfhq_val_row(name: str, val_fraction: float) -> bool:
+    """Deterministic train/val assignment by md5(name), independent of seed and per-generator caps."""
+    return int(hashlib.md5(name.encode("utf-8")).hexdigest()[:8], 16) / 2**32 < val_fraction
+
+
 class SFHQT2IDataset(Dataset):
     """bitmind/SyntheticFacesHQ T2I zip (fakes only); generator = filename prefix."""
 
     def __init__(self, zip_path: str | Path, generators: tuple[str, ...] | None = None,
-                 max_per_generator: int | None = None, align_size: int = 256, seed: int = 0):
+                 max_per_generator: int | None = None, align_size: int = 256, seed: int = 0,
+                 split: str | None = None, val_fraction: float = 0.2, exclude_generators: tuple[str, ...] = (),
+                 quality_range: tuple[int, int] = (75, 95)):
+        if split not in (None, "train", "val"):
+            raise ValueError(f"Unknown SFHQ split {split!r}; expected None, 'train' or 'val'")
         self.zip_path = Path(zip_path)
         self.align_size = align_size
+        self.quality_range = tuple(quality_range)
         rng = np.random.default_rng(seed)
         by_gen: dict[str, list[str]] = {}
         with zipfile.ZipFile(self.zip_path) as zf:
@@ -207,6 +218,10 @@ class SFHQT2IDataset(Dataset):
                     by_gen.setdefault(SFHQ_GENERATORS[m.group(1)], []).append(name)
         if generators:
             by_gen = {g: v for g, v in by_gen.items() if g in generators}
+        by_gen = {g: v for g, v in by_gen.items() if g not in exclude_generators}
+        if split is not None:
+            by_gen = {g: [n for n in v if sfhq_val_row(n, val_fraction) == (split == "val")]
+                      for g, v in by_gen.items()}
         self.items: list[tuple[str, str]] = []
         self.stats: dict[str, int] = {}
         for gen in sorted(by_gen):
@@ -241,4 +256,4 @@ class SFHQT2IDataset(Dataset):
         name, gen = self.items[idx]
         with self._z().open(name) as f:
             img = Image.open(io.BytesIO(f.read())).convert("RGB")
-        return align_format(img, self.align_size, quality_for(name)), 1, gen
+        return align_format(img, self.align_size, quality_for(name, *self.quality_range)), 1, gen
