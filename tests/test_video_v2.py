@@ -51,10 +51,10 @@ def _wdf_root(tmp_path: Path) -> Path:
 def test_wdf_clip_selection_and_ids(tmp_path):
     root = _wdf_root(tmp_path)
     clips = {c["clip_id"]: c for c in wdf_clips(json.loads((root / "index_train.json").read_text()), "train")}
-    assert set(clips) == {"wdf_fake_1_3", "wdf_real_1_2"}
-    fake, real = clips["wdf_fake_1_3"], clips["wdf_real_1_2"]
-    assert (fake["label"], fake["method"], fake["video_group"]) == (1, "wilddeepfake", "wdf/fake/1")
-    assert (real["label"], real["method"], real["video_group"]) == (0, "real", "wdf/real/1")
+    assert set(clips) == {"wdf_train_fake_1_3", "wdf_train_real_1_2"}
+    fake, real = clips["wdf_train_fake_1_3"], clips["wdf_train_real_1_2"]
+    assert (fake["label"], fake["method"], fake["video_group"]) == (1, "wilddeepfake", "wdf/train/fake/1")
+    assert (real["label"], real["method"], real["video_group"]) == (0, "real", "wdf/train/real/1")
     frames = [e["frame"] for e in fake["frames"]]
     expected = [100 + 3 * int(i) for i in np.linspace(0, 39, 16).round().astype(int)]
     assert frames == expected and len(set(frames)) == 16
@@ -85,13 +85,13 @@ def test_extract_script_wdf_merge(tmp_path):
     clips = json.loads((out / "clips.json").read_text())
     assert [c for c in clips if c["source"] != "wdf"] == before
     wdf = {c["clip_id"]: c for c in clips if c["source"] == "wdf"}
-    assert wdf["wdf_fake_1_3"]["n_frames"] == 16 and "frames" not in wdf["wdf_fake_1_3"]
-    assert wdf["wdf_fake_1_9"]["split"] == "test" and wdf["wdf_real_4_1"]["video_group"] == "wdf/real/4"
+    assert wdf["wdf_train_fake_1_3"]["n_frames"] == 16 and "frames" not in wdf["wdf_train_fake_1_3"]
+    assert wdf["wdf_test_fake_1_9"]["split"] == "test" and wdf["wdf_test_real_4_1"]["video_group"] == "wdf/test/real/4"
     tars = {e["tar"] for e in json.loads((out / "index.json").read_text())}
     assert tars == {"thb_test.tar", "celebvhq_test.tar", "wdf_train.tar", "wdf_test.tar"}
     ds = VideoClipDataset(out, clips)
-    assert len(ds) == len(clips) and ds.group(clips.index(wdf["wdf_fake_1_3"])) == "wdf/fake/1"
-    assert ds[clips.index(wdf["wdf_fake_1_3"])][0][0].size == (256, 256)
+    assert len(ds) == len(clips) and ds.group(clips.index(wdf["wdf_train_fake_1_3"])) == "wdf/train/fake/1"
+    assert ds[clips.index(wdf["wdf_train_fake_1_3"])][0][0].size == (256, 256)
     assert ds.group(0) == clips[0]["clip_id"]  # no video_group -> clip_id
 
 
@@ -148,3 +148,39 @@ def test_manifest_name_and_plan_files():
     assert smoke == ["deepfake_in_the_wild/real_train/0.tar.gz", "deepfake_in_the_wild/fake_train/0.tar.gz"]
     assert all("_test/" in p for p, _ in mod.plan_files("wilddeepfake", tree))
     assert "wilddeepfake_train" not in mod.EVAL_DATASETS
+
+
+def test_wdf_train_test_same_numbers_do_not_collide(tmp_path):
+    """Regression (PR #18 review): video/clip numbers restart per split, so train and test both have fake/1/3."""
+    root = tmp_path / "wilddeepfake"
+    d = root / "deepfake_in_the_wild"
+    _wdf_tar(d / "fake_train" / "1.tar.gz", [f"./1/fake/3/{f}.png" for f in range(6)])
+    _wdf_tar(d / "fake_test" / "1.tar.gz", [f"./1/fake/3/{f}.png" for f in range(4)])
+    _wdf_tar(d / "real_train" / "2.tar.gz", [f"./2/real/5/{f}.png" for f in range(3)])
+    _wdf_tar(d / "real_test" / "2.tar.gz", [f"./2/real/5/{f}.png" for f in range(2)])
+    for split in ("train", "test"):
+        write_wilddeepfake_index(root, build_wilddeepfake_index(root, split=split), split=split)
+    train = wdf_clips(json.loads((root / "index_train.json").read_text()), "train")
+    test = wdf_clips(json.loads((root / "index_test.json").read_text()), "test")
+    assert {c["clip_id"] for c in train}.isdisjoint(c["clip_id"] for c in test)
+    assert {c["video_group"] for c in train}.isdisjoint(c["video_group"] for c in test)
+    out = tmp_path / "frames"
+    r = _script("extract_video_frames").main(["--sources", "wdf", "--wdf-root", str(root), "--out", str(out),
+                                              "--workers", "1"])
+    assert r["failed"] == 0
+    clips = json.loads((out / "clips.json").read_text())
+    ds = VideoClipDataset(out, clips)
+    tar_of = {c["clip_id"]: {e["tar"] for e in ds.frames[i]} for i, c in enumerate(ds.clips)}
+    assert tar_of == {"wdf_train_fake_1_3": {"wdf_train.tar"}, "wdf_test_fake_1_3": {"wdf_test.tar"},
+                      "wdf_train_real_2_5": {"wdf_train.tar"}, "wdf_test_real_2_5": {"wdf_test.tar"}}
+    expected = {"wdf_train_fake_1_3": 6, "wdf_test_fake_1_3": 4, "wdf_train_real_2_5": 3, "wdf_test_real_2_5": 2}
+    assert {c["clip_id"]: len(ds.frames[i]) for i, c in enumerate(ds.clips)} == expected
+
+
+def test_video_dataset_keys_frames_by_tar(tmp_path):
+    """Same clip id in two tars (legacy ids) must not merge frames across tars."""
+    clips = [{"clip_id": "dup", "source": "wdf", "split": "train", "method": "real", "label": 0, "n_frames": 3},
+             {"clip_id": "dup", "source": "wdf", "split": "test", "method": "real", "label": 0, "n_frames": 2}]
+    ds = VideoClipDataset(_frame_root(tmp_path, clips), clips)
+    assert [len(f) for f in ds.frames] == [3, 2]
+    assert [{e["tar"] for e in f} for f in ds.frames] == [{"wdf_train.tar"}, {"wdf_test.tar"}]

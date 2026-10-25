@@ -71,9 +71,10 @@ def wdf_clips(index: list[dict], split: str, max_frames: int = 16) -> list[dict]
         entries = sorted(entries, key=lambda e: e["frame"])
         picks = np.unique(np.linspace(0, len(entries) - 1, min(max_frames, len(entries))).round().astype(int))
         kind = "real" if label == 0 else "fake"
-        clips.append({"clip_id": f"wdf_{kind}_{video}_{clip}", "source": "wdf",
+        # Video numbers restart per official split, so ids and groups must carry the split (else train/test collide).
+        clips.append({"clip_id": f"wdf_{split}_{kind}_{video}_{clip}", "source": "wdf",
                       "method": "real" if label == 0 else "wilddeepfake", "split": split, "label": int(label),
-                      "video_group": f"wdf/{kind}/{video}", "frames": [entries[i] for i in picks]})
+                      "video_group": f"wdf/{split}/{kind}/{video}", "frames": [entries[i] for i in picks]})
     return clips
 
 
