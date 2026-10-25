@@ -1,0 +1,40 @@
+# Video V3: WildDeepfake train + Celeb-DF v2 train (official test list held out), temporal adapter, V2b recipe.
+#
+# Train/val: WDF *_train + Celeb-DF non-test videos; validation holds out whole groups (md5(video_group) < 0.15):
+#   WDF videos, Celeb-DF target identities (celebdf/idX, a real video and its fakes together; YouTube-real per clip).
+#   Celeb-DF swapped-in face identities (idY) still overlap across splits, as in the official Celeb-DF split.
+# Balance: Celeb-DF is ~6:1 fake:real, so its train fakes are capped per target identity to <= 2:1 (seeded);
+#   WDF is unchanged. Per-source class counts are printed in the run log.
+# Test (extra splits, scored once): wdf_test (official WDF test), celebdf_test (official List_of_testing_videos),
+#   thb_cross (THB test fakes + CelebV-HQ test reals).
+# Alignment: Celeb-DF frames are cropped to the largest YuNet face (x1.3 square; centre fallback counted per class)
+#   and then aligned exactly like WDF/THB frames (256 INTER_AREA, JPEG q95).
+# Recipe (V2b fix of the V2 dead-VIB collapse): head lr 2e-4, LoRA lr 5e-5, warm start from V2b's best.pt.
+
+model:
+  backbone: facebook/dinov2-base
+  feature_layers: [4, 8, 10, 12]
+  lora_rank: 8
+  lora_blocks: 3
+  temporal: true
+  beauty_head: false
+
+data:
+  source: video_wdf
+  video_frames_root: /data/video_frames
+  video_frames_per_clip: 8
+  video_val_fraction: 0.15
+  video_train_sources: [wdf, celebdf]
+  video_celebdf_max_fake_ratio: 2.0
+  num_workers: 6
+
+train:
+  epochs: 4
+  batch_size: 8
+  beauty_weight: 0.0
+  log_every: 20
+  calibration_method: conformal
+  lr: 0.0002
+  lora_lr: 0.00005
+  init_checkpoint: /runs/video_v2b_r2/config/best.pt
+  output_dir: runs/video_wdf_v3

@@ -48,6 +48,24 @@ class DeepfakeDetector(nn.Module):
         state = {n: t for n, t in self.state_dict().items() if full or "lora_" in n or not n.startswith("backbone.")}
         torch.save({"model_config": dataclasses.asdict(self.cfg), "state_dict": state, **(extra or {})}, path)
 
+    def warm_start(self, path: str | Path) -> dict[str, list[str]]:
+        """Copy every checkpoint tensor whose name and shape match this model, except the temporal adapter (it stays
+        identity-initialised). Returns {loaded, shape_mismatch, not_in_model, temporal_skipped} key lists."""
+        ckpt = torch.load(path, map_location="cpu", weights_only=True)["state_dict"]
+        own = self.state_dict()
+        out: dict[str, list[str]] = {"loaded": [], "shape_mismatch": [], "not_in_model": [], "temporal_skipped": []}
+        for k, v in ckpt.items():
+            if k.startswith("temporal."):
+                out["temporal_skipped"].append(k)
+            elif k not in own:
+                out["not_in_model"].append(k)
+            elif own[k].shape != v.shape:
+                out["shape_mismatch"].append(k)
+            else:
+                out["loaded"].append(k)
+        self.load_state_dict({k: ckpt[k] for k in out["loaded"]}, strict=False)
+        return out
+
     @classmethod
     def load(cls, path: str | Path, map_location: str | torch.device = "cpu") -> tuple["DeepfakeDetector", dict]:
         # weights_only=True: refuse arbitrary pickled objects (code execution on load). Checkpoints contain only

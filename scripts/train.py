@@ -62,6 +62,13 @@ def main() -> None:
           f"selection={selection} holdout={holdout}")
 
     model = DeepfakeDetector(cfg.model)
+    if cfg.train.init_checkpoint:
+        ws = model.warm_start(cfg.train.init_checkpoint)
+        (out / "warm_start.json").write_text(json.dumps(ws, indent=2))
+        print(f"[init] {cfg.train.init_checkpoint}: loaded {len(ws['loaded'])} tensors "
+              f"({sum(k.startswith('head.') for k in ws['loaded'])} head, {sum('lora_' in k for k in ws['loaded'])} "
+              f"LoRA); skipped {len(ws['shape_mismatch'])} shape-mismatch, {len(ws['not_in_model'])} not-in-model "
+              f"({ws['not_in_model'][:4]}), {len(ws['temporal_skipped'])} temporal")
     best = Trainer(model, cfg, train_loader, val_loader, test_loader, fit_loader).train()
 
     # Calibrate on known generators, not either OOD generator.

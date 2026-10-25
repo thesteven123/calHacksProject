@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import os
 import re
 import zipfile
 from pathlib import Path
@@ -158,6 +159,7 @@ class WildDeepfakeDataset(Dataset):
                 frames = [frames[i] for i in sel]
             self.items.extend(frames)
         self._handles: dict[str, object] = {}
+        self._pid = os.getpid()
 
     def __getstate__(self):
         d = self.__dict__.copy()
@@ -165,6 +167,8 @@ class WildDeepfakeDataset(Dataset):
         return d
 
     def _handle(self, tar: str):
+        if self._pid != os.getpid():  # forked worker: inherited fds share seek positions with the parent
+            self._handles, self._pid = {}, os.getpid()
         if tar not in self._handles:
             self._handles[tar] = open(self.root / tar, "rb")
         return self._handles[tar]
@@ -233,6 +237,7 @@ class SFHQT2IDataset(Dataset):
             self.stats[gen] = len(names)
             self.items += [(n, gen) for n in names]
         self._zip: zipfile.ZipFile | None = None
+        self._pid = os.getpid()
 
     def __getstate__(self):
         d = self.__dict__.copy()
@@ -240,6 +245,8 @@ class SFHQT2IDataset(Dataset):
         return d
 
     def _z(self) -> zipfile.ZipFile:
+        if self._pid != os.getpid():  # forked worker: an inherited zip fd shares its seek position
+            self._zip, self._pid = None, os.getpid()
         if self._zip is None:
             self._zip = zipfile.ZipFile(self.zip_path, "r")
         return self._zip
@@ -280,6 +287,7 @@ class FFHQDataset(Dataset):
             entries = [entries[i] for i in keep]
         self.items: list[dict] = entries
         self._handles: dict[str, object] = {}
+        self._pid = os.getpid()
 
     def __getstate__(self):
         d = self.__dict__.copy()
@@ -287,6 +295,8 @@ class FFHQDataset(Dataset):
         return d
 
     def _handle(self, tar: str):
+        if self._pid != os.getpid():  # forked worker: inherited fds share seek positions with the parent
+            self._handles, self._pid = {}, os.getpid()
         if tar not in self._handles:
             self._handles[tar] = open(self.root / tar, "rb")
         return self._handles[tar]

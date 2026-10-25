@@ -96,6 +96,8 @@ class DataConfig:
     video_frames_per_clip: int = 8
     video_methods: tuple[str, ...] = ()  # TalkingHeadBench fake methods; empty = all 6
     video_val_fraction: float = 0.15  # source=video_wdf: md5(video_group) fraction held out for validation
+    video_train_sources: tuple[str, ...] = ("wdf",)  # source=video_wdf: clip sources trained on (+ "celebdf")
+    video_celebdf_max_fake_ratio: float = 2.0  # cap Celeb-DF train fakes per target identity to <= ratio x reals
 
 
 @dataclass
@@ -120,6 +122,7 @@ class TrainConfig:
     target_fpr: float = 0.01
     target_fnr: float = 0.02
     calibration_method: str = "conformal"  # "conformal" (split-conformal, per-generator FNR) | "empirical"
+    init_checkpoint: str | None = None  # warm-start matching LoRA + head weights (DeepfakeDetector.warm_start)
 
 
 @dataclass

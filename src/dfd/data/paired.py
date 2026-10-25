@@ -12,6 +12,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import io
+import os
 import zipfile
 from pathlib import Path
 from typing import Sequence
@@ -120,6 +121,7 @@ class DeepFakeFaceDataset(Dataset):
         self.cache_dir = Path(cache_dir) if cache_dir else None
 
         self._zips: dict[str, zipfile.ZipFile] = {}
+        self._pid = os.getpid()
         self.zip_paths: dict[str, Path] = {}
         self.folder_paths: dict[str, Path] = {}
 
@@ -211,7 +213,14 @@ class DeepFakeFaceDataset(Dataset):
                 elif cat in self.generators:
                     self.items.append((cat, path_or_name, 1, cat, g))
 
+    def __getstate__(self):
+        d = self.__dict__.copy()
+        d["_zips"] = {}
+        return d
+
     def _get_zip(self, cat: str) -> zipfile.ZipFile:
+        if self._pid != os.getpid():  # forked worker: inherited zip fds share seek positions with the parent
+            self._zips, self._pid = {}, os.getpid()
         if cat not in self._zips:
             self._zips[cat] = zipfile.ZipFile(self.zip_paths[cat], "r")
         return self._zips[cat]

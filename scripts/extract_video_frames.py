@@ -6,7 +6,9 @@
 Every clip (real or fake) is sampled at 4 fps from t=0 (max 16 frames; shorter clips: 16 stamps spread over the
 duration) and each frame is centre-square-cropped, resized to 256x256 (INTER_AREA) and JPEG q95-encoded, so source
 resolution/fps (LivePortrait 320x320 @10 fps, CelebV-HQ 23.98 fps) are not label cues. WildDeepfake clips are
-already PNG frame sequences: up to 16 frames evenly spaced over each clip, aligned identically. Output:
+already PNG frame sequences: up to 16 frames evenly spaced over each clip, aligned identically. Celeb-DF v2 videos
+are full frames, so each sampled frame is first cropped to the largest YuNet face (x1.3 square; centre-crop fallback
+counted per class). Output:
 <out>/<source>_<split>.tar (members <clip_id>/<k:02d>.jpg), index.json (tar byte offsets) and clips.json.
 Torch-free: runs on the CPU-only Modal image.
 """
@@ -16,6 +18,7 @@ from __future__ import annotations
 import argparse
 import io
 import json
+import re
 import tarfile
 import time
 from multiprocessing import Pool
@@ -27,12 +30,32 @@ from dfd.data.video_frames import extract_clip_job, wdf_clips
 THB_METHODS = ("EmoPortrait", "AniPortraitAudio", "LivePortrait", "Hallo2", "AniPortraitVideo", "Hallo")
 THB_SPLITS = ("train", "val", "test")
 WDF_SPLITS = ("train", "test")
-SOURCES = ("thb", "celebvhq", "wdf")
+SOURCES = ("thb", "celebvhq", "wdf", "celebdf")
+CELEBDF_DIRS = {"Celeb-real": ("celebreal", 0), "YouTube-real": ("ytreal", 0), "Celeb-synthesis": ("synth", 1)}
+_CELEBDF_TARGET = re.compile(r"^(id\d+)_")
+
+
+def celebdf_clips(root: Path, face_onnx: str | None) -> list[dict]:
+    """Celeb-DF v2 clips: test = List_of_testing_videos.txt paths (labels from the folder, not the list column),
+    train = the rest. video_group = celebdf/idX (target video identity, so a real video and its fakes stay
+    together) or celebdf/yt_<stem> for YouTube-real. idY (swapped-in face) identities still overlap across splits."""
+    test = {line.split()[-1] for line in (root / "List_of_testing_videos.txt").read_text().splitlines() if line.strip()}
+    clips = []
+    for folder, (kind, label) in CELEBDF_DIRS.items():
+        for p in sorted((root / folder).glob("*.mp4")):
+            split = "test" if f"{folder}/{p.name}" in test else "train"
+            m = _CELEBDF_TARGET.match(p.stem)
+            group = f"celebdf/{m.group(1)}" if m else f"celebdf/yt_{p.stem}"
+            clips.append({"clip_id": f"celebdf_{split}_{kind}_{p.stem}", "source": "celebdf", "split": split,
+                          "method": "celebdf" if label else "real", "label": label, "video_group": group,
+                          "path": str(p), "face_onnx": face_onnx})
+    return clips
 CELEBV_SPLITS = {"Train": "train", "Val": "val", "Test": "test"}
 
 
 def list_clips(thb_root: Path, celebvhq_root: Path, sources: tuple[str, ...] = ("thb", "celebvhq"),
-               wdf_root: Path | None = None, max_frames: int = 16) -> list[dict]:
+               wdf_root: Path | None = None, max_frames: int = 16, celebdf_root: Path | None = None,
+               face_onnx: str | None = None) -> list[dict]:
     """THB fakes (clip_id = stem, method/split from the path), CelebV-HQ reals listed in real_dataset_split.json,
     and WildDeepfake train/test clips from index_<split>.json (frames chosen by dfd.data.video_frames.wdf_clips)."""
     clips = []
@@ -48,6 +71,10 @@ def list_clips(thb_root: Path, celebvhq_root: Path, sources: tuple[str, ...] = (
             if not index.exists():
                 raise FileNotFoundError(f"{index} missing: ingest wilddeepfake (test) / wilddeepfake_train first")
             clips += [{**c, "root": str(wdf_root)} for c in wdf_clips(json.loads(index.read_text()), split, max_frames)]
+    if "celebdf" in sources:
+        if not face_onnx or not Path(face_onnx).is_file():
+            raise FileNotFoundError(f"celebdf needs the YuNet model (--yunet); got {face_onnx!r}")
+        clips += celebdf_clips(celebdf_root, str(face_onnx))
     if "celebvhq" not in sources:
         return clips
     split_json = json.loads((thb_root / "real" / "real_dataset_split.json").read_text())
@@ -93,7 +120,19 @@ def write_frames(clips: list[dict], out: Path, workers: int = 8, fps_sample: flo
     old = json.loads((out / "clips.json").read_text()) if (out / "clips.json").exists() else []
     (out / "clips.json").write_text(json.dumps([c for c in old if c["source"] not in sources] + done))
     (out / "failures.json").write_text(json.dumps(failures, indent=2))
-    return {"clips": len(done), "failed": len(failures), "tars": sorted(tars)}
+    return {"clips": len(done), "failed": len(failures), "tars": sorted(tars), "face_fallback": face_fallback(done)}
+
+
+def face_fallback(clips: list[dict]) -> dict:
+    """Centre-crop fallback (no face found) per class for face-cropped sources; a large real/fake difference would
+    be a label shortcut."""
+    out = {}
+    for name, label in (("real", 0), ("fake", 1)):
+        cs = [c for c in clips if "face_fallback_frames" in c and c["label"] == label]
+        frames, total = sum(c["face_fallback_frames"] for c in cs), sum(c["n_frames"] for c in cs)
+        out[name] = {"clips": len(cs), "fallback_frames": frames, "frames": total,
+                     "rate": round(frames / total, 4) if total else None}
+    return out
 
 
 def main(argv: list[str] | None = None) -> dict:
@@ -101,6 +140,8 @@ def main(argv: list[str] | None = None) -> dict:
     ap.add_argument("--thb-root", default="/data/thb")
     ap.add_argument("--celebvhq-root", default="/data/celebvhq")
     ap.add_argument("--wdf-root", default="/data/wilddeepfake")
+    ap.add_argument("--celebdf-root", default="/data/celebdf")
+    ap.add_argument("--yunet", default="/opt/yunet.onnx", help="YuNet ONNX for celebdf face crops")
     ap.add_argument("--sources", default="thb,celebvhq", help=f"comma-separated subset of {','.join(SOURCES)}")
     ap.add_argument("--out", default="/data/video_frames")
     ap.add_argument("--workers", type=int, default=8)
@@ -116,7 +157,7 @@ def main(argv: list[str] | None = None) -> dict:
         raise SystemExit(f"Unknown sources {sorted(set(sources) - set(SOURCES))}; expected {SOURCES}")
     t0 = time.time()
     clips = list_clips(Path(args.thb_root), Path(args.celebvhq_root), sources, Path(args.wdf_root),
-                       args.max_frames)[: args.limit]
+                       args.max_frames, Path(args.celebdf_root), args.yunet)[: args.limit]
     print(f"[frames] {len(clips)} clips "
           f"({sum(c['label'] == 1 for c in clips)} fake / {sum(c['label'] == 0 for c in clips)} real)", flush=True)
     r = write_frames(clips, Path(args.out), args.workers, args.fps, args.max_frames, args.size, args.quality, sources)

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 from pathlib import Path
 
 from PIL import Image
@@ -40,6 +41,7 @@ class VideoClipDataset(Dataset):
         self.clips = list(clips)
         self.frames = [[e for _, e in sorted(by_clip[k], key=lambda x: x[0])] for k in keys]
         self._handles: dict[str, object] = {}
+        self._pid = os.getpid()
 
     def __getstate__(self):
         d = self.__dict__.copy()
@@ -47,6 +49,8 @@ class VideoClipDataset(Dataset):
         return d
 
     def _handle(self, tar: str):
+        if self._pid != os.getpid():  # forked worker: inherited fds share seek positions with the parent
+            self._handles, self._pid = {}, os.getpid()
         if tar not in self._handles:
             self._handles[tar] = open(self.root / tar, "rb")
         return self._handles[tar]

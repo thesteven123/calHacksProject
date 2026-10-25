@@ -10,6 +10,8 @@
     .venv/bin/modal run scripts/modal_data.py --action frames                      # -> /data/video_frames
     .venv/bin/modal run scripts/modal_data.py --action ingest --dataset wilddeepfake_train
     .venv/bin/modal run scripts/modal_data.py --action frames --video-sources wdf  # merges WildDeepfake clips
+    .venv/bin/modal run --detach scripts/modal_data.py --action ingest --dataset celebdf   # official Drive zip
+    .venv/bin/modal run --detach scripts/modal_data.py --action frames --video-sources celebdf  # YuNet face crops
 
 Volume layout: /data/genimage/data/<split>/<DIR>/..., /data/wilddeepfake/deepfake_in_the_wild/... (+index_test.json),
 /data/sfhq_t2i/SyntheticFacesHighQuality-T2I.zip, /data/ffhq/<NNNNN>.tar (+index.json),
@@ -47,6 +49,24 @@ _THB_REAL_JSON = re.compile(r"^real/[^/]+\.json$")
 THB_SPLIT_JSON = "/data/thb/real/real_dataset_split.json"
 CELEBVHQ_FILES = ("videos.tar", "celebvhq_info.json")
 SFHQ_ZIP = "SyntheticFacesHighQuality-T2I.zip"
+# Celeb-DF v2 is not on the HF Hub: official Google Drive zip (access via the official request form). The Drive file
+# id lives in the gitignored runs/helper/CELEBDF_SECRET.txt and reaches Modal only as an ephemeral secret; it is never
+# printed, passed as an argument, or written to manifests. Never part of "--dataset all"; request it by name.
+CELEBDF = {"dest": "/data/celebdf", "zip": "Celeb-DF-v2.zip", "source": "official form link",
+           "licence": "Celeb-DF terms of use (non-commercial research; access via the official request form)",
+           "members": ("Celeb-real/", "YouTube-real/", "Celeb-synthesis/", "List_of_testing_videos.txt")}
+def _main_checkout(project: Path) -> Path:
+    """The main repository root, also from a git worktree (whose .git is a 'gitdir: <main>/.git/worktrees/x' file);
+    untracked files such as runs/helper/* live only there."""
+    git = project / ".git"
+    if git.is_file():
+        gitdir = Path(git.read_text().split("gitdir:", 1)[1].strip())
+        if gitdir.parent.name == "worktrees":
+            return gitdir.parent.parent.parent
+    return project
+
+
+CELEBDF_SECRET_FILE = _main_checkout(PROJECT) / "runs" / "helper" / "CELEBDF_SECRET.txt"
 # "--dataset all" skips opt-in large sets (WildDeepfake train split, +63 GB); request them by name.
 OPT_IN = ("wilddeepfake_train",)
 ALL_DATASETS = [k for k in DATASETS if k not in OPT_IN]
@@ -62,11 +82,19 @@ CPU_PRICE_PER_S = CPU_N * 0.0000131 + (MEM_MB / 1024) * 0.00000222
 GPU_PRICE_PER_S = 0.000222 + 8.0 * 0.0000131 + 32 * 0.00000222
 TIB = 1024 ** 4
 
+# YuNet face detector for Celeb-DF face crops: same opencv_zoo model (MIT) as serve/, checksum-pinned.
+YUNET_URL = ("https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/"
+             "face_detection_yunet_2023mar.onnx")
+YUNET_SHA256 = "8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4"
 cpu_image = (
     modal.Image.debian_slim(python_version="3.12")
     .uv_pip_install(  # pins mirror requirements.lock
         "huggingface-hub==2.2.0", "datasets==5.1.0", "pyarrow==26.0.0",
         "pillow==13.0.0", "numpy==2.5.4", "pyyaml==6.0.3", "opencv-python-headless==5.0.0.93",
+    )
+    .run_commands(
+        f"python -c \"import urllib.request; urllib.request.urlretrieve('{YUNET_URL}', '/opt/yunet.onnx')\"",
+        f"echo '{YUNET_SHA256}  /opt/yunet.onnx' | sha256sum -c -",
     )
     .env({"PYTHONPATH": f"{REMOTE}/src", "HF_HOME": "/cache/hf", "TOKENIZERS_PARALLELISM": "false"})
     .add_local_dir(PROJECT / "src", f"{REMOTE}/src")
@@ -102,6 +130,114 @@ def _hf_secret() -> list:
             if line.strip().startswith("HF_TOKEN="):
                 token = line.split("=", 1)[1].strip().strip("\"'")
     return [modal.Secret.from_dict({"HF_TOKEN": token})] if token else []
+
+
+def _celebdf_drive_id() -> str:
+    """Drive file id from the gitignored secret file (local only)."""
+    m = re.search(r"[A-Za-z0-9_-]{20,}", CELEBDF_SECRET_FILE.read_text()) if CELEBDF_SECRET_FILE.is_file() else None
+    if not m:
+        raise SystemExit(f"Celeb-DF Drive id not found in {CELEBDF_SECRET_FILE} (gitignored; ask devin-impl)")
+    return m.group(0)
+
+
+def _celebdf_url(drive_id: str) -> str:
+    return f"https://drive.usercontent.google.com/download?id={drive_id}&export=download&confirm=t"
+
+
+def _celebdf_secret() -> list:
+    """Ephemeral secret carrying only the Celeb-DF Drive id (resolved locally; empty inside the container)."""
+    import os
+
+    # Same list locally and in the container (Modal requires identical definitions): locally from the secret file,
+    # remotely from the env var the secret itself injected.
+    if modal.is_local():
+        m = re.search(r"[A-Za-z0-9_-]{20,}", CELEBDF_SECRET_FILE.read_text()) if CELEBDF_SECRET_FILE.is_file() else None
+        drive_id = m.group(0) if m else ""
+    else:
+        drive_id = os.environ.get("CELEBDF_DRIVE_ID", "")
+    return [modal.Secret.from_dict({"CELEBDF_DRIVE_ID": drive_id})] if drive_id else []  # import must never fail
+
+
+def download_resumable(url: str, path: str | Path, total: int, opener=None, chunk: int = 1 << 22,
+                       retries: int = 8, commit=None, commit_every: int = 1 << 30) -> int:
+    """Append-download `url` to `path` with HTTP Range until it has `total` bytes. Returns bytes fetched now.
+
+    Errors are re-raised WITHOUT the URL (it may embed a private file id).
+    """
+    import urllib.request
+
+    opener = opener or urllib.request.urlopen
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fetched, since_commit, failures = 0, 0, 0
+    while (have := path.stat().st_size if path.exists() else 0) < total:
+        req = urllib.request.Request(url, headers={"Range": f"bytes={have}-", "User-Agent": "dfd-ingest"})
+        try:
+            with opener(req) as resp, open(path, "ab") as f:
+                status = getattr(resp, "status", 206)
+                if status == 200 and have:
+                    raise IOError("server ignored Range (status 200) on a resumed download")
+                if status not in (200, 206):
+                    raise IOError(f"unexpected HTTP status {status}")
+                while buf := resp.read(chunk):
+                    f.write(buf)
+                    fetched += len(buf)
+                    since_commit += len(buf)
+                    if commit and since_commit >= commit_every:
+                        f.flush()
+                        commit()
+                        since_commit = 0
+        except Exception as e:  # noqa: BLE001 - sanitized: never surface the URL
+            failures += 1
+            if failures > retries:
+                raise RuntimeError(f"download failed after {retries} retries: {type(e).__name__}") from None
+            time.sleep(min(60, 2 ** failures))
+    if path.stat().st_size != total:
+        raise IOError(f"size mismatch: {path.stat().st_size} != {total}")
+    return fetched
+
+
+def extract_zip_members(zip_path: str | Path, dest: str | Path, prefixes: tuple[str, ...]) -> dict:
+    """Extract members whose path (after an optional single top-level dir) starts with one of `prefixes`, skipping
+    existing same-size files. Returns per-prefix counts plus extracted/skipped totals."""
+    import shutil
+    import zipfile
+
+    dest = Path(dest)
+    counts = {p: 0 for p in prefixes}
+    extracted = skipped = 0
+    with zipfile.ZipFile(zip_path) as zf:
+        for info in zf.infolist():
+            if info.is_dir():
+                continue
+            rel = info.filename
+            if not rel.startswith(prefixes) and "/" in rel:  # zip with one top-level dir, e.g. Celeb-DF-v2/...
+                rel = rel.split("/", 1)[1]
+            hit = next((p for p in prefixes if rel.startswith(p)), None)
+            if hit is None:
+                continue
+            counts[hit] += 1
+            out = dest / rel
+            if out.exists() and out.stat().st_size == info.file_size:
+                skipped += 1
+                continue
+            out.parent.mkdir(parents=True, exist_ok=True)
+            with zf.open(info) as src, open(out, "wb") as dst:
+                shutil.copyfileobj(src, dst, 1 << 20)
+            extracted += 1
+    return {"counts": counts, "extracted": extracted, "skipped": skipped}
+
+
+def _celebdf_size(drive_id: str) -> int:
+    """Total zip size from a 1-byte Range request (Content-Range), without downloading."""
+    import urllib.request
+
+    req = urllib.request.Request(_celebdf_url(drive_id), headers={"Range": "bytes=0-0", "User-Agent": "dfd-ingest"})
+    try:
+        with urllib.request.urlopen(req) as resp:
+            return int(resp.headers["Content-Range"].rsplit("/", 1)[1])
+    except Exception as e:  # noqa: BLE001 - sanitized
+        raise SystemExit(f"Celeb-DF size probe failed: {type(e).__name__}") from None
 
 
 def select_shards(n: int, k: int | None) -> list[int]:
@@ -260,6 +396,12 @@ def _celebvhq_needed_count() -> None:
 
 
 def _plan(dataset: str, generators: tuple[str, ...], train_shards: int, smoke: bool, ffhq_shards: int = 15) -> None:
+    if dataset == "celebdf":
+        size = _celebdf_size(_celebdf_drive_id())
+        est_s = size / 30e6
+        print(f"[plan] celebdf      source={CELEBDF['source']} file={CELEBDF['zip']} bytes={size / 1e9:.1f} GB  "
+              f"est ingest ~{est_s / 3600:.1f}h CPU ~${est_s * CPU_PRICE_PER_S:.2f} (+ unzip)")
+        return
     from huggingface_hub import HfApi
 
     api = HfApi()
@@ -354,7 +496,8 @@ def extract_frames(limit: int | None = None, video_sources: str = "thb,celebvhq"
 
     t0 = time.time()
     cmd = ["python", f"{REMOTE}/scripts/extract_video_frames.py", "--thb-root", "/data/thb",
-           "--celebvhq-root", "/data/celebvhq", "--wdf-root", "/data/wilddeepfake", "--sources", video_sources,
+           "--celebvhq-root", "/data/celebvhq", "--wdf-root", "/data/wilddeepfake", "--celebdf-root", "/data/celebdf",
+           "--yunet", "/opt/yunet.onnx", "--sources", video_sources,
            "--out", "/data/video_frames", "--workers", str(int(FRAMES_CPU))]
     if limit:
         cmd += ["--limit", str(limit)]
@@ -363,6 +506,26 @@ def extract_frames(limit: int | None = None, video_sources: str = "thb,celebvhq"
     wall = time.time() - t0
     return {"returncode": proc.returncode, "wall_s": round(wall, 1),
             "est_cost_usd": round(wall * FRAMES_PRICE_PER_S, 3), "log_tail": (proc.stdout + proc.stderr)[-4000:]}
+
+
+@app.function(cpu=CPU_N, memory=MEM_MB, timeout=TIMEOUT_S, volumes={"/data": data_vol}, secrets=_celebdf_secret())
+def ingest_celebdf(total: int) -> dict:
+    import os
+
+    t0 = time.time()
+    dest = Path(CELEBDF["dest"])
+    zip_path = dest / CELEBDF["zip"]
+    fetched = download_resumable(_celebdf_url(os.environ["CELEBDF_DRIVE_ID"]), zip_path, total,
+                                 commit=data_vol.commit)
+    data_vol.commit()
+    ex = extract_zip_members(zip_path, dest, CELEBDF["members"])
+    manifest = {"source": CELEBDF["source"], "licence": CELEBDF["licence"], "file": CELEBDF["zip"], "size": total,
+                "extraction": ex, "created_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+    (dest / "MANIFEST.json").write_text(json.dumps(manifest, indent=2))
+    data_vol.commit()
+    wall = time.time() - t0
+    return {"dataset": "celebdf", "fetched_bytes": fetched, "extraction": ex, "wall_s": round(wall, 1),
+            "est_cost_usd": round(wall * CPU_PRICE_PER_S, 3)}
 
 
 @app.function(cpu=2.0, memory=4096, timeout=600, volumes={"/data": data_vol})
@@ -445,6 +608,12 @@ def main(action: str = "plan", dataset: str = "all", generators: str = "", train
             print(f"[report] {name:12s} rev={str(mf.get('revision'))[:10]} files={len(files)} "
                   f"~{total:.1f} GB created={mf.get('created_utc')}")
         print(f"[report] /data usage: { {k: f'{v / 1e9:.1f} GB' for k, v in r['bytes_by_dir'].items()} }")
+        return
+    if action == "ingest" and dataset == "celebdf":
+        size = _celebdf_size(_celebdf_drive_id())
+        print(f"[ingest] celebdf: {size / 1e9:.1f} GB from the official Drive zip (id kept secret)")
+        r = ingest_celebdf.remote(size)
+        print(f"[ingest] celebdf: {r}")
         return
     if action == "ingest":
         names = [dataset] if dataset != "all" else ALL_DATASETS

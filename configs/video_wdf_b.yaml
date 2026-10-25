@@ -1,0 +1,43 @@
+# Video V2b: configs/video_wdf.yaml with the V2-collapse fix (runs/modal/video_v2_diag): V2's VIB encoder died
+# (mu std exactly 0 on val; backbone features intact, frozen-DINOv2 linear probe val AUC 0.83) under head lr 1e-3.
+# Fix: head lr 2e-4, LoRA lr 5e-5, warm start of LoRA + VIB head from the face model B3 (temporal adapter stays
+# identity-initialised).
+#
+# Base description (video_wdf.yaml): WildDeepfake (Apache-2.0) in-the-wild face-swap clips, temporal adapter.
+#
+# Train:  WildDeepfake *_train clips (real_train + fake_train), minus the validation hold-out videos.
+# Val:    whole train-split videos with md5(video_group) fraction < 0.15 (video-level hold-out); no generator
+#         holdouts (single fake class), so checkpoint selection and calibration use this split (select = fit).
+# Test:   extra split wdf_test = the official *_test clips, plus thb_cross = TalkingHeadBench test fakes + CelebV-HQ
+#         test reals (cross-type check), both scored after training with calibrated verdicts.
+# Disjointness: video numbers restart per split (592 train + 115 test fake tars = 707 = the paper's video count),
+# so the official train/test split is video-disjoint; within train, clips are grouped by wdf/<kind>/<video>.
+# Alignment: up to 16 frames evenly spaced per clip, each centre square crop -> 256x256 INTER_AREA -> JPEG q95
+# (scripts/extract_video_frames.py --sources wdf), exactly like THB/CelebV-HQ; eval_external aligns WildDeepfake
+# frames the same way for temporal checkpoints.
+
+model:
+  backbone: facebook/dinov2-base
+  feature_layers: [4, 8, 10, 12]
+  lora_rank: 8
+  lora_blocks: 3
+  temporal: true
+  beauty_head: false
+
+data:
+  source: video_wdf
+  video_frames_root: /data/video_frames
+  video_frames_per_clip: 8
+  video_val_fraction: 0.15
+  num_workers: 6
+
+train:
+  epochs: 4
+  batch_size: 8
+  beauty_weight: 0.0
+  log_every: 20
+  calibration_method: conformal
+  lr: 0.0002
+  lora_lr: 0.00005
+  init_checkpoint: /runs/face_t2i_b3/config/best.pt
+  output_dir: runs/video_wdf_b
