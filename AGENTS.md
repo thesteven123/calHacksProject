@@ -2,10 +2,14 @@
 
 ## Division of Responsibilities
 
-- **Antigravity (ML Literature Review Agent)**:
-  - **Scope**: Exclusively performs literature review and academic/industry research.
-  - **Responsibilities**: Search, analyze, and synthesize recent papers on deepfake generation (diffusion, autoregressive, flow-matching, GANs) and forensic detection; evaluate benchmarks (Omni-Fake, SIDA, Deepfake-Eval, TrueFake); conduct adversarial critiques and identify failure modes under social-media compression and camera pipelines.
-  - **Boundaries**: Strictly no implementation or prototype code. All findings, paper analyses, and adversarial reviews are documented under `research/` (e.g., `research/papers.md`, `research/critiques/`).
+- **copilot-git-organizer (Git & GitHub Manager)**:
+  - **Scope**: Exclusively owns ALL git and GitHub operations for the repository.
+  - **Responsibilities**: Branch creation, staging, commits, rebases, PR creation, review delegation, and merging.
+  - **Boundaries**: Does not do web searching, ML research, or feature implementation. All other agents must request `copilot-git-organizer` to perform git actions.
+- **Antigravity / Codex (Web Search & ML Research Agent in `calHacksProject` pane)**:
+  - **Scope**: Dedicated Web Search, API/Documentation Retrieval, and Academic Research agent, primarily supporting `devin-impl` during coding.
+  - **Responsibilities**: Execute live web searches, verify Hugging Face datasets and API endpoints, retrieve package documentation (PyTorch, Timm, WebDataset, Modal, Tinker), look up bugfixes/GitHub issues, and analyze academic literature.
+  - **Boundaries**: Strictly research and web search only. **DO NOT confuse with `copilot-git-organizer`** — does not execute git commits/branches/pushes/merges. Does not write implementation code in `src/`, `scripts/`, `configs/`, or `tests/`.
 - **Devin Agent (Architecture Design & Implementation)**:
   - **Scope**: In charge of designing the model architecture and executing the complete code implementation.
   - **Responsibilities**: Implement model architectures, feature extractors, loss formulations, training pipelines, data augmentation / compression emulators, hardware optimization (TensorRT, INT8/FP8), and production deployment services under `src/` and system architecture design in `docs/`.
