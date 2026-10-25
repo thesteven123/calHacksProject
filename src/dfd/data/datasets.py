@@ -5,6 +5,7 @@ Every source yields `(PIL.Image, label: int, generator: str)` with label 1 = fak
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
 import numpy as np
@@ -402,6 +403,27 @@ def split_nested_holdouts(
     return tuple(SubsetDataset(val, sorted(indices)) for indices in (fit, selection, test))
 
 
+def _video_clips(cfg: DataConfig) -> list[dict]:
+    import json
+
+    return json.loads((Path(cfg.video_frames_root) / "clips.json").read_text())
+
+
+def _wdf_val_group(video_group: str, fraction: float) -> bool:
+    """Deterministic video-level validation hold-out: md5(video_group) fraction < `fraction`."""
+    return int(hashlib.md5(video_group.encode("utf-8")).hexdigest()[:8], 16) / 2**32 < fraction
+
+
+def _wdf_extra_splits(cfg: DataConfig) -> dict[str, Dataset]:
+    """wdf_test = official WildDeepfake test clips; thb_cross = THB test fakes + CelebV-HQ test reals (if present)."""
+    from dfd.data.video import VideoClipDataset
+
+    clips = _video_clips(cfg)
+    parts = {"wdf_test": [c for c in clips if c["source"] == "wdf" and c["split"] == "test"],
+             "thb_cross": [c for c in clips if c["source"] in ("thb", "celebvhq") and c["split"] == "test"]}
+    return {k: VideoClipDataset(cfg.video_frames_root, v) for k, v in parts.items() if v}
+
+
 def eval_splits(cfg: DataConfig, base_val: Dataset, seed: int = 0) -> dict[str, Dataset]:
     """Named validation splits, identical to scripts/train.py for the same seed."""
     sel, test = tuple(cfg.selection_generators), tuple(cfg.holdout_generators)
@@ -411,6 +433,8 @@ def eval_splits(cfg: DataConfig, base_val: Dataset, seed: int = 0) -> dict[str, 
         select, final = split_val_holdout(base_val, test, seed=seed)
         fit = select
     splits = {"all": base_val, "fit": fit, "select": select, "test": final}
+    if cfg.source == "video_wdf":
+        splits.update(_wdf_extra_splits(cfg))
     if cfg.sowaiba_eval:
         splits["sowaiba"] = SowaibaDataset(
             root=cfg.sowaiba_root,
@@ -515,6 +539,14 @@ def build_base_datasets(cfg: DataConfig, seed: int = 0) -> tuple[Dataset, Datase
         train = [c for c in clips if c["split"] == "train" and (c["label"] == 0 or c["method"] not in holdout)]
         val = [c for c in clips if c["split"] in ("val", "test")]
         return VideoClipDataset(root, train), VideoClipDataset(root, val)
+    if cfg.source == "video_wdf":
+        from dfd.data.video import VideoClipDataset
+
+        # Official WildDeepfake train/test are video-disjoint; validation holds out whole train videos.
+        wdf_train = [c for c in _video_clips(cfg) if c["source"] == "wdf" and c["split"] == "train"]
+        held = [_wdf_val_group(c["video_group"], cfg.video_val_fraction) for c in wdf_train]
+        return (VideoClipDataset(cfg.video_frames_root, [c for c, h in zip(wdf_train, held) if not h]),
+                VideoClipDataset(cfg.video_frames_root, [c for c, h in zip(wdf_train, held) if h]))
     if cfg.source == "genimage_arrow":
         from dfd.data.external import GENIMAGE_DIRS, GenImageArrowDataset
 

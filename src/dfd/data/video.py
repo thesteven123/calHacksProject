@@ -13,7 +13,13 @@ from pathlib import Path
 from PIL import Image
 from torch.utils.data import Dataset
 
-from dfd.data.video_frames import extract_clip_frames, probe_video, square_resize, video_timestamps  # noqa: F401
+from dfd.data.video_frames import (align_frame, extract_clip_frames, probe_video, square_resize,  # noqa: F401
+                                   video_timestamps)
+
+
+def clip_tar(clip: dict) -> str:
+    """Frame tar of a clips.json entry: explicit "tar", else the extractor's <source>_<split>.tar naming rule."""
+    return clip.get("tar") or f"{clip['source']}_{clip['split']}.tar"
 
 
 class VideoClipDataset(Dataset):
@@ -22,15 +28,17 @@ class VideoClipDataset(Dataset):
     def __init__(self, root: str | Path, clips: list[dict], index_path: str | Path | None = None):
         self.root = Path(root)
         entries = json.loads((Path(index_path) if index_path else self.root / "index.json").read_text())
-        by_clip: dict[str, list[tuple[int, dict]]] = {}
+        # Key frames by (tar, clip dir): the same clip id in two tars (e.g. split-restarted numbering) must not merge.
+        by_clip: dict[tuple[str, str], list[tuple[int, dict]]] = {}
         for e in entries:
             clip_id, frame = e["member"].rsplit("/", 1)
-            by_clip.setdefault(clip_id, []).append((int(Path(frame).stem), e))
-        missing = [c["clip_id"] for c in clips if c["clip_id"] not in by_clip]
+            by_clip.setdefault((e["tar"], clip_id), []).append((int(Path(frame).stem), e))
+        keys = [(clip_tar(c), c["clip_id"]) for c in clips]
+        missing = [k for k in keys if k not in by_clip]
         if missing:
             raise ValueError(f"{len(missing)} clips have no frames in the index, e.g. {missing[:3]}")
         self.clips = list(clips)
-        self.frames = [[e for _, e in sorted(by_clip[c["clip_id"]], key=lambda x: x[0])] for c in self.clips]
+        self.frames = [[e for _, e in sorted(by_clip[k], key=lambda x: x[0])] for k in keys]
         self._handles: dict[str, object] = {}
 
     def __getstate__(self):
@@ -49,6 +57,11 @@ class VideoClipDataset(Dataset):
     def meta(self, idx: int) -> tuple[int, str]:
         c = self.clips[idx]
         return int(c["label"]), ("real" if int(c["label"]) == 0 else c["method"])
+
+    def group(self, idx: int) -> str:
+        """Split group: the clip's source video (video_group) when known, so clips of one video stay together."""
+        c = self.clips[idx]
+        return c.get("video_group") or c["clip_id"]
 
     def clip_id(self, idx: int) -> str:
         return self.clips[idx]["clip_id"]

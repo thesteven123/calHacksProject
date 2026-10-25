@@ -95,6 +95,7 @@ class DataConfig:
     video_frames_root: str = "/data/video_frames"  # scripts/extract_video_frames.py output (source=video_thb)
     video_frames_per_clip: int = 8
     video_methods: tuple[str, ...] = ()  # TalkingHeadBench fake methods; empty = all 6
+    video_val_fraction: float = 0.15  # source=video_wdf: md5(video_group) fraction held out for validation
 
 
 @dataclass
