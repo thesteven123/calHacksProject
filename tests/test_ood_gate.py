@@ -67,6 +67,18 @@ def test_too_few_reals_raises():
         fit_ood_gate(np.zeros((19, 8)))
 
 
+@pytest.mark.parametrize("alpha", [0.0, 1.0, -0.05, 1.5, float("nan"), float("inf")])
+def test_invalid_alpha_raises(alpha):
+    with pytest.raises(ValueError, match="alpha"):
+        fit_ood_gate(np.random.default_rng(0).normal(size=(40, 4)), alpha)
+
+
+@pytest.mark.parametrize("alphas", ["0", "1", "-0.1", "0.05,2", "nan", ","])
+def test_cli_rejects_invalid_alphas(alphas, tmp_path):
+    with pytest.raises(SystemExit):
+        _script().main(["--checkpoint", str(tmp_path / "best.pt"), "--alphas", alphas, "--skip-external"])
+
+
 def test_predict_with_latents_shapes():
     model = DeepfakeDetector(ModelConfig(**TINY, image_size=56))
     ds = TransformedDataset(SyntheticDeepfakeDataset(6, image_size=64),

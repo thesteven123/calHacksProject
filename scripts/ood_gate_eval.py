@@ -86,6 +86,8 @@ def main(argv: list[str] | None = None) -> dict:
     ckpt = Path(args.checkpoint)
     run_dir = ckpt.parent
     alphas = [float(a) for a in args.alphas.split(",") if a]
+    if not alphas or any(not (np.isfinite(a) and 0.0 < a < 1.0) for a in alphas):
+        ap.error(f"--alphas must be a comma list of values strictly between 0 and 1, got {args.alphas!r}")
     cfg = Config.from_yaml(run_dir / "config.yaml")
     cal = Calibration.load(run_dir / "calibration.json")
     if cal.crop_mode != "center":
