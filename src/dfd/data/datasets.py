@@ -8,6 +8,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+import torch
 from PIL import Image
 from torch.utils.data import Dataset
 
@@ -164,11 +165,29 @@ class SubsetDataset(Dataset):
         return self.base[self.indices[idx]]
 
 
-class TransformedDataset(Dataset):
-    """Applies DetectorTransform with a per-(epoch, index) RNG so eval is deterministic and train varies."""
+def pick_clip_frames(n_stored: int, n_out: int, train: bool, rng: np.random.Generator) -> tuple[list[int], list[bool]]:
+    """Frame indices + validity mask. Eval: evenly spaced; train: same stride from a random start offset. Too few
+    stored frames -> all of them, then the last one repeated with mask False."""
+    if n_stored < n_out:
+        pad = n_out - n_stored
+        return list(range(n_stored)) + [n_stored - 1] * pad, [True] * n_stored + [False] * pad
+    if not train:
+        return np.linspace(0, n_stored - 1, n_out).round().astype(int).tolist(), [True] * n_out
+    stride = n_stored / n_out
+    start = rng.uniform(0, stride)
+    return [min(int(start + k * stride), n_stored - 1) for k in range(n_out)], [True] * n_out
 
-    def __init__(self, base: Dataset, transform: DetectorTransform, seed: int = 0):
+
+class TransformedDataset(Dataset):
+    """Applies DetectorTransform with a per-(epoch, index) RNG so eval is deterministic and train varies.
+
+    Clip items (base image is a list of frames) yield frames_per_clip frames [T,3,H,W] + mask [T]; every frame is
+    transformed with an identically re-created rng so PTE/crop/flip parameters are consistent within a clip.
+    """
+
+    def __init__(self, base: Dataset, transform: DetectorTransform, seed: int = 0, frames_per_clip: int = 8):
         self.base, self.transform, self.seed, self.epoch = base, transform, seed, 0
+        self.frames_per_clip = frames_per_clip
 
     def set_epoch(self, epoch: int) -> None:
         self.epoch = epoch
@@ -179,6 +198,8 @@ class TransformedDataset(Dataset):
     def __getitem__(self, idx: int) -> dict:
         img, label, gen = self.base[idx]
         epoch = self.epoch if self.transform.train else 0
+        if isinstance(img, list):
+            return self._clip(img, label, gen, epoch, idx)
         rng = np.random.default_rng([self.seed, epoch, idx])
         pixels, meta = self.transform(img, rng)
         return {
@@ -187,6 +208,21 @@ class TransformedDataset(Dataset):
             "beauty": int(meta.beauty),
             "generator": gen,
             "severity": meta.severity,
+        }
+
+
+    def _clip(self, frames: list, label: int, gen: str, epoch: int, idx: int) -> dict:
+        key = [self.seed, epoch, idx]
+        picks, mask = pick_clip_frames(len(frames), self.frames_per_clip, self.transform.train,
+                                       np.random.default_rng(key))
+        out = [self.transform(frames[i], np.random.default_rng(key)) for i in picks]
+        return {
+            "pixels": torch.stack([p for p, _ in out]),
+            "mask": torch.tensor(mask, dtype=torch.bool),
+            "label": label,
+            "beauty": 0,
+            "generator": gen,
+            "severity": out[0][1].severity,
         }
 
 
@@ -467,6 +503,18 @@ def build_base_datasets(cfg: DataConfig, seed: int = 0) -> tuple[Dataset, Datase
         train = CompositeDataset(train_parts) if len(train_parts) > 1 else train_parts[0]
         val = CompositeDataset(val_parts) if len(val_parts) > 1 else val_parts[0]
         return train, val
+    if cfg.source == "video_thb":
+        import json
+
+        from dfd.data.video import VideoClipDataset
+
+        root = Path(cfg.video_frames_root)
+        clips = json.loads((root / "clips.json").read_text())
+        clips = [c for c in clips if c["label"] == 0 or not cfg.video_methods or c["method"] in cfg.video_methods]
+        # THB splits are identity-disjoint, so train = train split; val = val + test splits (nested LOGO routes them).
+        train = [c for c in clips if c["split"] == "train" and (c["label"] == 0 or c["method"] not in holdout)]
+        val = [c for c in clips if c["split"] in ("val", "test")]
+        return VideoClipDataset(root, train), VideoClipDataset(root, val)
     if cfg.source == "genimage_arrow":
         from dfd.data.external import GENIMAGE_DIRS, GenImageArrowDataset
 

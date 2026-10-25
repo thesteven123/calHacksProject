@@ -1,0 +1,37 @@
+# Video V1: TalkingHeadBench talking-head fakes vs CelebV-HQ real clips, temporal adapter, nested LOGO by method.
+#
+# Training:   THB train-split fakes of AniPortraitAudio / LivePortrait / Hallo2 / Hallo (+ CelebV-HQ train reals)
+# Selection:  AniPortraitVideo (THB val+test splits; never trained on) - checkpoint choice only
+# Test:       EmoPortrait (THB val+test splits; untouched) - scored once
+# THB train vs val/test splits are identity-disjoint, so no pair grouping is needed.
+#
+# Format controls (LivePortrait is 320x320 @10 fps, CelebV-HQ 23.98 fps, others 512x512 @25 fps):
+# scripts/extract_video_frames.py samples every clip by TIME (4 fps from t=0, max 16 frames; shorter clips spread
+# 16 stamps over their duration) and aligns every frame identically (centre square crop -> 256x256 INTER_AREA ->
+# JPEG q95). Training picks 8 of the stored frames (random start offset) and applies PTE with the same parameters to
+# every frame of a clip. Frames live on the dfd-data volume (scripts/modal_data.py --action ingest/frames).
+# Licences: TalkingHeadBench MIT; CelebV-HQ non-commercial research only (unofficial HF mirror).
+
+model:
+  backbone: facebook/dinov2-base
+  feature_layers: [4, 8, 10, 12]
+  lora_rank: 8
+  lora_blocks: 3
+  temporal: true
+  beauty_head: false
+
+data:
+  source: video_thb
+  video_frames_root: /data/video_frames
+  video_frames_per_clip: 8
+  selection_generators: [AniPortraitVideo]
+  holdout_generators: [EmoPortrait]
+  num_workers: 6
+
+train:
+  epochs: 4
+  batch_size: 8
+  beauty_weight: 0.0
+  log_every: 20
+  calibration_method: conformal
+  output_dir: runs/video_thb_nested

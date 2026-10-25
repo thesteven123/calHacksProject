@@ -311,5 +311,5 @@ def test_download_files_always_calls_download_fn(tmp_path):
             p.write_bytes(b"\x01" * dict(files)[filename])
 
     downloaded, reused, n_bytes = mod._download_files("repo", files, "sha123", dest, fake_dl)
-    assert [c[0] for c in calls] == ["x.bin", "y.bin"] and all(c[1] == "sha123" for c in calls)
+    assert sorted(c[0] for c in calls) == ["x.bin", "y.bin"] and all(c[1] == "sha123" for c in calls)  # threaded
     assert (downloaded, reused, n_bytes) == (1, 1, 4)

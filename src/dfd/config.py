@@ -92,6 +92,9 @@ class DataConfig:
     ffhq_val_fraction: float = 0.2
     ffhq_max_train: int | None = 12000
     ffhq_max_val: int | None = 3000
+    video_frames_root: str = "/data/video_frames"  # scripts/extract_video_frames.py output (source=video_thb)
+    video_frames_per_clip: int = 8
+    video_methods: tuple[str, ...] = ()  # TalkingHeadBench fake methods; empty = all 6
 
 
 @dataclass

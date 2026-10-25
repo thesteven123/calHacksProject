@@ -141,6 +141,47 @@ def _print_fairness(fair: dict) -> None:
               f"Wilson {s['above_target_ci'] or 'none'}, Holm {s['above_target_holm'] or 'none'}")
 
 
+class _ClipSequences(Dataset):
+    """WildDeepfake frames grouped per clip into one [T,3,H,W] sequence (+ mask) for temporal checkpoints."""
+
+    def __init__(self, base: Dataset, transform, frames_per_clip: int):
+        self.base, self.transform, self.t = base, transform, frames_per_clip
+        by_clip: dict[str, list[int]] = {}
+        for i in range(len(base)):
+            by_clip.setdefault(base.clip_id(i), []).append(i)
+        self.clips = sorted(by_clip.items())
+
+    def __len__(self) -> int:
+        return len(self.clips)
+
+    def __getitem__(self, idx: int) -> dict:
+        clip_id, rows = self.clips[idx]
+        rows = rows[: self.t]
+        pixels = [self.transform(self.base[i][0], np.random.default_rng(idx))[0] for i in rows]
+        mask = [True] * len(pixels) + [False] * (self.t - len(pixels))
+        pixels += [pixels[-1]] * (self.t - len(pixels))
+        return {"pixels": torch.stack(pixels), "mask": torch.tensor(mask), "label": self.base.meta(rows[0])[0],
+                "clip_id": clip_id}
+
+
+@torch.no_grad()
+def _eval_wilddeepfake_temporal(pipe, ds, frames_per_clip: int, batch_size: int, num_workers: int) -> dict:
+    """Temporal checkpoint: one pooled logit per clip; its calibration was fit on clip logits, so verdicts apply."""
+    # batch_size counts frames, as on the image path, so clips per batch = batch_size // T.
+    loader = DataLoader(_ClipSequences(ds, pipe.transform, frames_per_clip),
+                        batch_size=max(1, batch_size // frames_per_clip), num_workers=num_workers, shuffle=False)
+    logits, labels = [], []
+    for batch in loader:
+        out = pipe.model(batch["pixels"].to(pipe.device), batch["mask"].to(pipe.device))
+        logits += out["logit"].float().cpu().tolist()
+        labels += batch["label"].tolist()
+    logits, labels = np.asarray(logits), np.asarray(labels)
+    return {"frame": None,
+            "clip": {**binary_metrics(labels, logits), "n_clips": len(labels),
+                     "verdicts": _verdict_rates(pipe.cal, logits, labels, pipe.calibration_status),
+                     "note": "temporal checkpoint: clips scored as T-frame sequences (top-k pooled logit)"}}
+
+
 def _eval_wilddeepfake(pipe, ds, batch_size: int, num_workers: int) -> dict:
     preds = _predict(pipe, ds, batch_size, num_workers)
     logits, labels = np.asarray(preds["logits"]), np.asarray(preds["labels"])
@@ -194,7 +235,10 @@ def main() -> None:
     root = Path(args.data_root)
     if args.dataset == "wilddeepfake":
         ds = WildDeepfakeDataset(root / "wilddeepfake", frames_per_clip=args.frames_per_clip)
-        report = _eval_wilddeepfake(pipe, ds, args.batch_size, args.num_workers)
+        if pipe.model.temporal is not None:
+            report = _eval_wilddeepfake_temporal(pipe, ds, args.frames_per_clip, args.batch_size, args.num_workers)
+        else:
+            report = _eval_wilddeepfake(pipe, ds, args.batch_size, args.num_workers)
     elif args.dataset == "fairface":
         ds = FairFaceDataset("validation", max_items=args.max_items)
         report = _eval_fairface(pipe, ds, args.batch_size, args.num_workers, args.fairness_min_n)
@@ -216,7 +260,11 @@ def main() -> None:
     if pipe.calibration_status != "matched":
         print(f"[eval_external] WARNING: calibration_status={pipe.calibration_status!r} — "
               "thresholds were not fit on this score distribution; all verdicts forced to abstain")
-    if args.dataset == "wilddeepfake":
+    if args.dataset == "wilddeepfake" and report["frame"] is None:
+        co, cv = report["clip"], report["clip"]["verdicts"]
+        print(f"[wilddeepfake] temporal clips n={co['n_clips']} auc={co['auc']} tpr@1%fpr={co['tpr@1%fpr']} "
+              f"| real FPR(verdict=fake)={cv['fpr_fake_verdict']} abstain={cv['abstain_rate']}")
+    elif args.dataset == "wilddeepfake":
         fv = report["frame"]["verdicts"]
         fo, co = report["frame"], report["clip"]
         print(f"[wilddeepfake] frames n={fo['n']} auc={fo['auc']} tpr@1%fpr={fo['tpr@1%fpr']} "
