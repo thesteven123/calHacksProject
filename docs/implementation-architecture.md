@@ -645,3 +645,34 @@ the code stays as an experiment. The fix has to come from training data (face T2
 **Ops:** run B2 (B1 + Tiny-GenImage) was lost twice: once to a local heartbeat timeout (client disconnect cancels
 an ephemeral app) and once to a Modal-side cancellation during an L4 capacity shortage. Long jobs now use
 `modal run --detach`, and `train_rotation` retries once.
+
+### 2026-10-24 (later): B3 — FFHQ second real-face source; FairFace fairness check
+
+**Setup** (`configs/face_t2i_ffhq_nested.yaml`, PR #14): B1 plus FFHQ-1024 real portraits (15 of 70 tars, 12k train
+/ 3k val, same 384 alignment). Flux is still held out and DALL-E 3 is still the selection set. 2 epochs, L4,
+≈ $1.2. FairFace (validation, 10,954 real faces) is scored with `dfd.eval.fairness` (PR #15): Wilson CIs, exact
+binomial + Holm tests against the 1% target, and empirical-Bayes-shrunk gaps.
+
+| | 7-rot. baseline (SD15→MJ for FairFace) | B1 | **B3** |
+|---|---|---|---|
+| Held-out Flux AUC / TPR@1%FPR (vs val reals) | – | 0.988 / 0.84 | **0.988 / 0.85** (reals now include FFHQ portraits) |
+| SFHQ-val Flux dev / pro / schnell caught | 4.6% / 2.9% / 19% | 56% / 67% / 74% | **86% / 91% / 93%** (≤ 0.2% labelled real) |
+| FairFace real-face FPR (overall) | 0.41% | 1.13% | **0.58%** |
+| FairFace review burden | 35.5% | 28.9% | **18.7%** |
+| Worst race FPR | East Asian 0.65% | Indian 1.65% | Middle Eastern 0.99% |
+| Worst race x gender FPR | Indian female 0.92% | Indian female 2.10% | Middle Eastern male 1.35% |
+| Age 0–2 / 3–9 FPR | 1.5% / 0.6% | **8.5% / 2.1%** | **0.5% / 0.4%** |
+| Groups above 1% (Holm, race) | none | none | none |
+| Sowaiba real-face FPR / AUC | – | 3.3% / 0.80 | **1.2%** / 0.74 |
+| WildDeepfake real-face FPR / frame AUC | 1.8% mean / 0.64 | 4.3% / 0.64 | 2.4% / **0.53** |
+| WildDeepfake fakes labelled real | 4.9% mean | 24% | **41%** |
+
+**Read-out:**
+1. FFHQ fixed the "portrait style" shortcut on the face-T2I side. Flux recall rose again, real-face FPR on
+   FairFace and Sowaiba fell, and B1's child false alarms (IMDB-WIKI reals are almost all adults) are gone.
+   No race or race x gender group is significantly above the 1% target.
+2. B3 is **not a face-swap detector**. WildDeepfake is at chance, and 41% of in-the-wild face-swap frames get a
+   confident "real" verdict. Sowaiba (inswapper) FNR is 30%. It must not be deployed alone for face swaps;
+   swap/reenactment and video training data are required (`research/video_datasets.md`).
+3. In-the-wild real-face FPR (WildDeepfake 2.4%) is still above target: low-resolution video face crops differ
+   from every calibration source.

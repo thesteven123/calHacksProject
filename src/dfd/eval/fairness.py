@@ -121,8 +121,8 @@ def disparity_summary(table: dict, target: float | None, min_n: int = 100, alpha
     lo = min(powered, key=lambda g: powered[g]["rate"]) if powered else None
     max_rate = powered[hi]["rate"] if hi else None
     min_rate = powered[lo]["rate"] if lo else None
-    eb = eb_shrink(table)
-    eb_powered = [eb[g] for g in powered]
+    eb = eb_shrink(powered)  # prior from powered groups only: sparse extreme cells must not set the shrinkage
+    eb_powered = list(eb.values())
     holm_p = None if target is None else holm_adjust(
         {g: binom_sf(r["k"], r["n"], target) for g, r in table.items()})
     return {
@@ -136,7 +136,7 @@ def disparity_summary(table: dict, target: float | None, min_n: int = 100, alpha
         "gap_ci": bootstrap_gap_ci(table, list(powered)),
         "rates_eb": eb,
         "gap_eb": max(eb_powered) - min(eb_powered) if powered else None,
-        "gap_eb_ci": bootstrap_gap_ci(table, list(powered), shrink=True),
+        "gap_eb_ci": bootstrap_gap_ci(powered, list(powered), shrink=True),
         "underpowered": [g for g, r in table.items() if r["n"] < min_n],
     }
 

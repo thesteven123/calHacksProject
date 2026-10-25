@@ -159,6 +159,15 @@ def test_eb_shrink_pools_noise_and_keeps_real_spread():
     assert 0 < s["gap_eb"] <= s["gap"] and s["gap_eb_ci"][0] <= s["gap_eb"] <= s["gap_eb_ci"][1]
 
 
+def test_eb_prior_ignores_underpowered_extreme_cell():
+    spread = {"lo": _row(5, 1000), "mid": _row(20, 1000), "hi": _row(60, 1000)}
+    base = disparity_summary(spread, target=0.01, min_n=100)
+    sparse = disparity_summary({**spread, "tiny": _row(1, 1)}, target=0.01, min_n=100)  # rate 100%, n=1
+    assert sparse["gap_eb"] == pytest.approx(base["gap_eb"])
+    assert sparse["gap_eb_ci"] == pytest.approx(base["gap_eb_ci"])
+    assert set(sparse["rates_eb"]) == {"lo", "mid", "hi"} and sparse["underpowered"] == ["tiny"]
+
+
 def test_fairness_report_age3_intersection():
     rep = fairness_report(["fake", "real", "abstain", "real"],
                           {"race": ["A", "A", "B", "B"], "gender": ["M", "F", "M", "F"],
