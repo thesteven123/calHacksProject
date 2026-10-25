@@ -8,7 +8,8 @@
     .venv/bin/modal run scripts/modal_data.py --action ood --run-tag full7_dinov2_conformal   # OOD-gate experiment
 
 Volume layout: /data/genimage/data/<split>/<DIR>/..., /data/wilddeepfake/deepfake_in_the_wild/... (+index_test.json),
-/data/sfhq_t2i/SyntheticFacesHighQuality-T2I.zip. Each dataset dir gets MANIFEST.json with the pinned revision sha.
+/data/sfhq_t2i/SyntheticFacesHighQuality-T2I.zip, /data/ffhq/<NNNNN>.tar (+index.json).
+Each dataset dir gets MANIFEST.json with the pinned revision sha.
 `plan` runs fully locally (HfApi metadata only) — no Modal compute is spawned.
 """
 
@@ -28,13 +29,15 @@ DATASETS = {
     "genimage": {"repo": "nebula/GenImage-arrow", "licence": "CC-BY-NC-SA-4.0", "dest": "/data/genimage"},
     "wilddeepfake": {"repo": "xingjunm/WildDeepfake", "licence": "Apache-2.0", "dest": "/data/wilddeepfake"},
     "sfhq_t2i": {"repo": "bitmind/SyntheticFacesHQ", "licence": "MIT", "dest": "/data/sfhq_t2i"},
+    "ffhq": {"repo": "gaunernst/ffhq-1024-wds", "licence": "CC-BY-NC-SA-4.0", "dest": "/data/ffhq"},
 }
 SFHQ_ZIP = "SyntheticFacesHighQuality-T2I.zip"
-EVAL_DATASETS = ("wilddeepfake", "sfhq_t2i")
+EVAL_DATASETS = ("wilddeepfake", "sfhq_t2i", "fairface")
 GENIMAGE_DIRS = {"ADM": "ADM", "BigGAN": "BigGAN", "GLIDE": "glide", "Midjourney": "Midjourney",
                  "SD14": "stable_diffusion_v_1_4", "SD15": "stable_diffusion_v_1_5", "VQDM": "VQDM",
                  "Wukong": "wukong"}
 _SHARD = re.compile(r"data-\d+-of-\d+\.arrow$")
+_FFHQ_TAR = re.compile(r"^\d+\.tar$")
 CPU_N, MEM_MB, TIMEOUT_S = 4.0, 8192, 4 * 3600
 # Modal list prices (USD/sec), modal.com/pricing 2026-10-24 — same rates as scripts/modal_logo.py.
 CPU_PRICE_PER_S = CPU_N * 0.0000131 + (MEM_MB / 1024) * 0.00000222
@@ -92,7 +95,7 @@ def select_shards(n: int, k: int | None) -> list[int]:
 
 
 def plan_files(dataset: str, tree: list[tuple[str, int]], generators: tuple[str, ...] = (),
-               train_shards: int = 4, smoke: bool = False) -> list[tuple[str, int]]:
+               train_shards: int = 4, smoke: bool = False, ffhq_shards: int = 15) -> list[tuple[str, int]]:
     """Pure file selection over a repo's (path, size_bytes) listing; unit-testable offline."""
     out: list[tuple[str, int]] = []
     if dataset == "genimage":
@@ -115,6 +118,9 @@ def plan_files(dataset: str, tree: list[tuple[str, int]], generators: tuple[str,
     elif dataset == "sfhq_t2i":
         if not smoke:  # smoke = no download; plan reads the remote zip central directory instead
             out += [(p, s) for p, s in tree if p.endswith(SFHQ_ZIP)]
+    elif dataset == "ffhq":
+        tars = sorted((p, s) for p, s in tree if _FFHQ_TAR.match(p))
+        out += [tars[i] for i in select_shards(len(tars), 1 if smoke else ffhq_shards)]
     else:
         raise ValueError(f"Unknown dataset {dataset!r}")
     return out
@@ -163,7 +169,7 @@ def _download_files(repo: str, files: list[tuple[str, int]], revision: str, dest
     return downloaded, reused, n_bytes
 
 
-def _plan(dataset: str, generators: tuple[str, ...], train_shards: int, smoke: bool) -> None:
+def _plan(dataset: str, generators: tuple[str, ...], train_shards: int, smoke: bool, ffhq_shards: int = 15) -> None:
     from huggingface_hub import HfApi
 
     api = HfApi()
@@ -171,7 +177,7 @@ def _plan(dataset: str, generators: tuple[str, ...], train_shards: int, smoke: b
     for name in ([dataset] if dataset != "all" else list(DATASETS)):
         spec = DATASETS[name]
         sha, tree, _ = _repo_tree(api, spec["repo"])
-        files = plan_files(name, tree, generators, train_shards, smoke)
+        files = plan_files(name, tree, generators, train_shards, smoke, ffhq_shards)
         size = sum(s for _, s in files)
         total += size
         # ~30 MB/s sustained HF download on the CPU ingest container -> cost estimate.
@@ -219,6 +225,10 @@ def ingest(dataset: str, files: list[tuple[str, int]], revision: str,
         from dfd.data.wilddeepfake_index import build_wilddeepfake_index, write_wilddeepfake_index
 
         write_wilddeepfake_index(dest, build_wilddeepfake_index(dest, split="test"), split="test")
+    if dataset == "ffhq":
+        from dfd.data.tar_index import build_image_tar_index, write_index
+
+        write_index(dest / "index.json", build_image_tar_index(dest, [dest / p for p, _ in files]))
     manifest = {"repo": spec["repo"], "revision": revision, "licence": spec["licence"],
                 "selection": selection,
                 "files": [{"path": p, "size": s, "sha256": sha256s.get(p)} for p, s in files],
@@ -261,6 +271,8 @@ def eval_external(dataset: str, checkpoint: str, frames_per_clip: int, max_per_g
         cmd += ["--sfhq-split", sfhq_split]
     proc = subprocess.run(cmd, capture_output=True, text=True)
     runs_vol.commit()
+    if dataset == "fairface":
+        hf_cache.commit()  # keep the FairFace download for later evals
     return {"dataset": dataset, "checkpoint": checkpoint, "returncode": proc.returncode,
             "wall_s": round(time.time() - t0, 1), "est_cost_usd": round((time.time() - t0) * GPU_PRICE_PER_S, 3),
             "output": out_path, "report": json.loads(Path(out_path).read_text()) if Path(out_path).exists() else None,
@@ -295,10 +307,10 @@ def _run_checkpoints(run_tag: str) -> list[str]:
 def main(action: str = "plan", dataset: str = "all", generators: str = "", train_shards: int = 4,
          smoke: bool = False, checkpoint: str = "", frames_per_clip: int = 8,
          max_per_generator: int = 2000, tag: str = "", run_tag: str = "", alphas: str = "0.05,0.10",
-         sfhq_split: str = "all"):
+         sfhq_split: str = "all", ffhq_shards: int = 15):
     gens = tuple(g for g in generators.split(",") if g)
     if action == "plan":
-        _plan(dataset, gens, train_shards, smoke)
+        _plan(dataset, gens, train_shards, smoke, ffhq_shards)
         return
     if action == "report":
         r = report_volume.remote()
@@ -319,14 +331,15 @@ def main(action: str = "plan", dataset: str = "all", generators: str = "", train
         api = HfApi()
         for name in names:
             sha, tree, sha256s = _repo_tree(api, DATASETS[name]["repo"])
-            files = plan_files(name, tree, gens, train_shards, smoke)
+            files = plan_files(name, tree, gens, train_shards, smoke, ffhq_shards)
             print(f"[ingest] {name}: {len(files)} files, {sum(s for _, s in files) / 1e9:.1f} GB")
             if not files:
                 if name == "sfhq_t2i" and smoke:
                     _sfhq_smoke_counts(DATASETS[name]["repo"])
                 continue
             r = ingest.remote(name, files, sha,
-                              {"generators": list(gens), "train_shards": train_shards, "smoke": smoke},
+                              {"generators": list(gens), "train_shards": train_shards, "smoke": smoke,
+                               "ffhq_shards": ffhq_shards},
                               sha256s)
             print(f"[ingest] {name}: {r}")
         return
@@ -389,4 +402,4 @@ if __name__ == "__main__":
     smoke_flag = "--smoke" in argv
     _plan(kv.get("dataset", "all"),
           tuple(g for g in kv.get("generators", "").split(",") if g),
-          int(kv.get("train_shards", 4)), smoke_flag)
+          int(kv.get("train_shards", 4)), smoke_flag, int(kv.get("ffhq_shards", 15)))

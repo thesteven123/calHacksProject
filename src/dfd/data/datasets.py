@@ -454,6 +454,15 @@ def build_base_datasets(cfg: DataConfig, seed: int = 0) -> tuple[Dataset, Datase
                                               max_per_generator=cfg.sfhq_max_per_generator_train, **sfhq_kw))
             val_parts.append(SFHQT2IDataset(cfg.sfhq_zip, split="val",
                                             max_per_generator=cfg.sfhq_max_per_generator_val, **sfhq_kw))
+        if cfg.ffhq_root:
+            if not cfg.dff_format_align:
+                raise ValueError("data.ffhq_root requires data.dff_format_align: FFHQ alignment must match DFF")
+            from dfd.data.external import FFHQDataset
+
+            ffhq_kw = dict(val_fraction=cfg.ffhq_val_fraction, align_size=FACE_ALIGN_SIZE,
+                           quality_range=FACE_JPEG_QUALITY, seed=seed)
+            train_parts.append(FFHQDataset(cfg.ffhq_root, split="train", max_items=cfg.ffhq_max_train, **ffhq_kw))
+            val_parts.append(FFHQDataset(cfg.ffhq_root, split="val", max_items=cfg.ffhq_max_val, **ffhq_kw))
 
         train = CompositeDataset(train_parts) if len(train_parts) > 1 else train_parts[0]
         val = CompositeDataset(val_parts) if len(val_parts) > 1 else val_parts[0]

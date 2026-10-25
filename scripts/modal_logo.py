@@ -61,8 +61,26 @@ def _hf_secret() -> list:
     return [modal.Secret.from_dict({"HF_TOKEN": token})] if token else []
 
 
+def _rotation_name(selection: str | None, test: str | None) -> str:
+    return "config" if selection is None else f"{selection}-to-{test}"
+
+
+def _classify_exit(returncode: int) -> str:
+    """0 -> ok; negative = killed by a signal (OOM SIGKILL, preemption SIGTERM) -> retryable; positive -> failed."""
+    if returncode == 0:
+        return "ok"
+    return "retryable" if returncode < 0 else "failed"
+
+
+def _failed_rotations(pairs_and_results) -> list[str]:
+    """Rotation names whose result is an exception or a dict with returncode != 0, in input order."""
+    return [name for name, r in pairs_and_results
+            if isinstance(r, BaseException) or r.get("returncode", 1) != 0]
+
+
 @app.function(gpu=GPU, cpu=CPU, memory=MEM_MB, timeout=TIMEOUT_S, max_containers=MAX_PARALLEL,
-              volumes={"/cache": hf_cache, "/runs": runs_vol, "/data": data_vol}, secrets=_hf_secret())
+              volumes={"/cache": hf_cache, "/runs": runs_vol, "/data": data_vol}, secrets=_hf_secret(),
+              retries=modal.Retries(max_retries=1, initial_delay=10.0, backoff_coefficient=1.0))
 def train_rotation(selection: str, test: str, backbone: str, epochs: int, tag: str, base_config: str) -> dict:
     import subprocess
 
@@ -70,7 +88,7 @@ def train_rotation(selection: str, test: str, backbone: str, epochs: int, tag: s
 
     t0 = time.time()
     cfg = yaml.safe_load(Path(f"{REMOTE}/{base_config}").read_text())
-    name = "config" if selection is None else f"{selection}-to-{test}"
+    name = _rotation_name(selection, test)
     out_dir = f"/runs/{tag}/{name}"
     cfg["model"]["backbone"] = backbone
     if selection is not None:
@@ -83,10 +101,16 @@ def train_rotation(selection: str, test: str, backbone: str, epochs: int, tag: s
     cfg_path.write_text(yaml.safe_dump(cfg))
     proc = subprocess.run(["python", f"{REMOTE}/scripts/train.py", "--config", str(cfg_path)],
                           capture_output=True, text=True)
+    log_path = Path(out_dir) / "train_log.txt"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_text(proc.stdout + proc.stderr)
     hf_cache.commit()  # persist downloaded datasets/weights for later rotations
     runs_vol.commit()
+    status = _classify_exit(proc.returncode)
+    if status == "retryable":  # raise so modal.Retries re-runs it; deterministic failures return below instead
+        raise RuntimeError(f"train.py killed by signal {-proc.returncode} for {name}; log at {log_path}")
     wall = time.time() - t0
-    result = {"rotation": name,
+    result = {"rotation": name, "status": status,
               "selection": "+".join(cfg["data"].get("selection_generators") or []),
               "test": "+".join(cfg["data"].get("holdout_generators") or []),
               "backbone": backbone, "epochs": epochs,
@@ -134,19 +158,25 @@ def main(rotations: str = "GLIDE:Midjourney", backbone: str = "facebook/dinov2-b
     print(f"[modal] {len(pairs)} rotation(s), backbone={backbone}, epochs={epochs}, tag={tag}, "
           f"~${PRICE_PER_S * 3600:.2f}/GPU-hour list")
     args = [(s, t, backbone, epochs, tag, base_config) for s, t in pairs]
+    names = [_rotation_name(s, t) for s, t in pairs]
     results = []
     if warm_first and len(args) > 1:
         # First job downloads data/weights into the shared cache; the rest then read it instead of racing.
-        results.append(train_rotation.remote(*args[0]))
+        try:
+            results.append(train_rotation.remote(*args[0]))
+        except Exception as e:  # noqa: BLE001 - record and keep running the other rotations
+            results.append(e)
         args = args[1:]
     results += list(train_rotation.starmap(args, return_exceptions=True))
 
     local = PROJECT / "runs" / "modal" / tag
     local.mkdir(parents=True, exist_ok=True)
     total = 0.0
-    for r in results:
-        if isinstance(r, Exception):
+    for name, r in zip(names, results):
+        if isinstance(r, BaseException):
             print(f"[modal] job failed: {type(r).__name__}: {r}")
+            (local / f"{name}.json").write_text(json.dumps({"rotation": name, "error": f"{type(r).__name__}: {r}"},
+                                                           indent=2))
             continue
         total += r["est_cost_usd"]
         (local / f"{r['rotation']}.json").write_text(json.dumps(r, indent=2))
@@ -157,3 +187,6 @@ def main(rotations: str = "GLIDE:Midjourney", backbone: str = "facebook/dinov2-b
         if r["returncode"] != 0:
             print(r["log_tail"][-1500:])
     print(f"[modal] estimated total ${total:.2f} (list price; actual in Modal dashboard). Results: {local}")
+    failed = _failed_rotations(zip(names, results))
+    if failed:
+        raise SystemExit(f"[modal] {len(failed)} rotation(s) failed: {failed}")

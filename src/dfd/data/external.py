@@ -3,6 +3,7 @@
 - GenImageArrowDataset: nebula/GenImage-arrow leaf bundles under <root>/data/<split>/<DIR>/data-*.arrow.
 - WildDeepfakeDataset: xingjunm/WildDeepfake uncompressed .tar.gz tars (eval-only, *_test dirs).
 - SFHQT2IDataset: bitmind/SyntheticFacesHQ T2I zip, fakes only.
+- FFHQDataset: gaunernst/ffhq-1024-wds plain tars (real portraits), via a byte-offset index.json.
 """
 
 from __future__ import annotations
@@ -257,3 +258,51 @@ class SFHQT2IDataset(Dataset):
         with self._z().open(name) as f:
             img = Image.open(io.BytesIO(f.read())).convert("RGB")
         return align_format(img, self.align_size, quality_for(name, *self.quality_range)), 1, gen
+
+
+class FFHQDataset(Dataset):
+    """FFHQ 1024 real portraits (gaunernst/ffhq-1024-wds tars), read at indexed member offsets; label 0."""
+
+    def __init__(self, root: str | Path, index_path: str | Path | None = None, split: str | None = None,
+                 val_fraction: float = 0.2, max_items: int | None = None, align_size: int = 384,
+                 quality_range: tuple[int, int] = (85, 95), seed: int = 0):
+        if split not in (None, "train", "val"):
+            raise ValueError(f"Unknown FFHQ split {split!r}; expected None, 'train' or 'val'")
+        self.root = Path(root)
+        self.align_size = align_size
+        self.quality_range = tuple(quality_range)
+        entries = json.loads((Path(index_path) if index_path else self.root / "index.json").read_text())
+        entries = sorted(entries, key=lambda e: (e["tar"], e["member"]))
+        if split is not None:
+            entries = [e for e in entries if sfhq_val_row(e["member"], val_fraction) == (split == "val")]
+        if max_items is not None and len(entries) > max_items:
+            keep = sorted(np.random.default_rng(seed).choice(len(entries), size=max_items, replace=False).tolist())
+            entries = [entries[i] for i in keep]
+        self.items: list[dict] = entries
+        self._handles: dict[str, object] = {}
+
+    def __getstate__(self):
+        d = self.__dict__.copy()
+        d["_handles"] = {}
+        return d
+
+    def _handle(self, tar: str):
+        if tar not in self._handles:
+            self._handles[tar] = open(self.root / tar, "rb")
+        return self._handles[tar]
+
+    def __len__(self) -> int:
+        return len(self.items)
+
+    def meta(self, idx: int) -> tuple[int, str]:
+        return 0, "real"
+
+    def group(self, idx: int) -> str:
+        return self.items[idx]["member"]
+
+    def __getitem__(self, idx: int) -> tuple[Image.Image, int, str]:
+        e = self.items[idx]
+        f = self._handle(e["tar"])
+        f.seek(e["offset"])
+        img = Image.open(io.BytesIO(f.read(e["size"]))).convert("RGB")
+        return align_format(img, self.align_size, quality_for(e["member"], *self.quality_range)), 0, "real"

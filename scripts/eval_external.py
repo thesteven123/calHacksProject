@@ -3,11 +3,13 @@
     python scripts/eval_external.py --dataset wilddeepfake --checkpoint /runs/<run>/best.pt
     python scripts/eval_external.py --dataset sfhq_t2i --checkpoint best.pt --max-per-generator 2000
     python scripts/eval_external.py --dataset sfhq_t2i --checkpoint best.pt --sfhq-split val
+    python scripts/eval_external.py --dataset fairface --checkpoint best.pt --max-items 2000
 
 Reuses DetectionPipeline's model, eval transform, and calibration so preprocessing is identical to
 deployment; nothing is fit or saved. WildDeepfake reports frame- and clip-level metrics plus calibrated
 verdict rates (the real-image FPR is the key real-world check of the conformal bound). SFHQ-T2I is
-fakes-only, so it reports recall/abstain/FNR rates per generator instead of AUC.
+fakes-only, so it reports recall/abstain/FNR rates per generator instead of AUC. FairFace is reals-only
+(HF cache, no /data): it reports real-face false-alarm rates by race, gender and age.
 """
 
 from __future__ import annotations
@@ -38,14 +40,38 @@ class _Transformed(Dataset):
         return {"pixels": pixels, "label": label, "generator": gen, "idx": idx}
 
 
+class FairFaceDataset(Dataset):
+    """HuggingFaceM4/FairFace (config 1.25, loose crops), all real; per-row race/gender/age names. No alignment."""
+
+    def __init__(self, split: str = "validation", max_items: int | None = None, seed: int = 0):
+        from datasets import load_dataset
+
+        ds = load_dataset("HuggingFaceM4/FairFace", "1.25", split=split)
+        if max_items is not None and len(ds) > max_items:
+            ds = ds.select(sorted(np.random.default_rng(seed).choice(len(ds), size=max_items, replace=False).tolist()))
+        self.ds = ds
+        attrs = ds.select_columns(["race", "gender", "age"])
+        self.race, self.gender, self.age = ([ds.features[c].int2str(int(x)) for x in attrs[c]]
+                                            for c in ("race", "gender", "age"))
+
+    def __len__(self) -> int:
+        return len(self.ds)
+
+    def __getitem__(self, idx: int) -> tuple:
+        return self.ds[idx]["image"].convert("RGB"), 0, "real"
+
+
+def _verdicts(cal, logits, status: str) -> np.ndarray:
+    if status == "matched":
+        return np.array([cal.verdict(p) for p in cal.prob(np.asarray(logits))], dtype=object)
+    # Thresholds were not fit on this score distribution: force abstain like DetectionPipeline._finalize.
+    return np.array(["abstain"] * len(np.asarray(logits)), dtype=object)
+
+
 def _verdict_rates(cal, logits, labels, status: str) -> dict:
     labels = np.asarray(labels)
     reals, fakes = labels == 0, labels == 1
-    if status == "matched":
-        v = np.array([cal.verdict(p) for p in cal.prob(np.asarray(logits))])
-    else:
-        # Thresholds were not fit on this score distribution: force abstain like DetectionPipeline._finalize.
-        v = np.array(["abstain"] * len(labels))
+    v = _verdicts(cal, logits, status)
     return {
         "n": int(len(labels)),
         "calibration_status": status,
@@ -69,6 +95,23 @@ def _predict(pipe, ds, batch_size: int, num_workers: int) -> dict:
         out["generators"] += list(batch["generator"])
         out["indices"] += batch["idx"].tolist()
     return out
+
+
+def _group_rates(verdicts: np.ndarray, probs: np.ndarray, groups: list[str]) -> dict:
+    """Per-group {n, fpr_fake_verdict, abstain_rate, mean_p_fake} for all-real rows."""
+    v, p, g = np.asarray(verdicts), np.asarray(probs, dtype=np.float64), np.asarray(groups)
+    return {str(k): {"n": int((g == k).sum()), "fpr_fake_verdict": float((v[g == k] == "fake").mean()),
+                     "abstain_rate": float((v[g == k] == "abstain").mean()), "mean_p_fake": float(p[g == k].mean())}
+            for k in sorted(set(g.tolist()))}
+
+
+def _eval_fairface(pipe, ds, batch_size: int, num_workers: int) -> dict:
+    preds = _predict(pipe, ds, batch_size, num_workers)
+    logits, labels, idx = np.asarray(preds["logits"]), np.asarray(preds["labels"]), preds["indices"]
+    v, probs = _verdicts(pipe.cal, logits, pipe.calibration_status), pipe.cal.prob(logits)
+    return {"overall": {**_verdict_rates(pipe.cal, logits, labels, pipe.calibration_status),
+                        "mean_p_fake": float(probs.mean())},
+            **{f"by_{a}": _group_rates(v, probs, [getattr(ds, a)[i] for i in idx]) for a in ("race", "gender", "age")}}
 
 
 def _eval_wilddeepfake(pipe, ds, batch_size: int, num_workers: int) -> dict:
@@ -104,13 +147,14 @@ def _eval_sfhq(pipe, ds, batch_size: int, num_workers: int) -> dict:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--dataset", required=True, choices=["wilddeepfake", "sfhq_t2i"])
+    ap.add_argument("--dataset", required=True, choices=["wilddeepfake", "sfhq_t2i", "fairface"])
     ap.add_argument("--checkpoint", required=True)
     ap.add_argument("--data-root", default="/data")
     ap.add_argument("--frames-per-clip", type=int, default=8)
     ap.add_argument("--max-per-generator", type=int, default=None)
     ap.add_argument("--sfhq-split", choices=["all", "train", "val"], default="all",
                     help="SFHQ-T2I md5 split (train/val match the face_t2i training split; all = whole zip)")
+    ap.add_argument("--max-items", type=int, default=None, help="FairFace: seeded subset for quick runs")
     ap.add_argument("--batch-size", type=int, default=64)
     ap.add_argument("--num-workers", type=int, default=4)
     ap.add_argument("--device", default="auto")
@@ -122,6 +166,9 @@ def main() -> None:
     if args.dataset == "wilddeepfake":
         ds = WildDeepfakeDataset(root / "wilddeepfake", frames_per_clip=args.frames_per_clip)
         report = _eval_wilddeepfake(pipe, ds, args.batch_size, args.num_workers)
+    elif args.dataset == "fairface":
+        ds = FairFaceDataset("validation", max_items=args.max_items)
+        report = _eval_fairface(pipe, ds, args.batch_size, args.num_workers)
     else:
         ds = SFHQT2IDataset(root / "sfhq_t2i" / "SyntheticFacesHighQuality-T2I.zip",
                             max_per_generator=args.max_per_generator,
@@ -147,6 +194,13 @@ def main() -> None:
               f"| real FPR(verdict=fake)={fv['fpr_fake_verdict']} abstain={fv['abstain_rate']}")
         print(f"[wilddeepfake] clips  n={co['n_clips']} auc={co['auc']} tpr@1%fpr={co['tpr@1%fpr']} "
               "(uncalibrated discrimination; clip verdicts omitted)")
+    elif args.dataset == "fairface":
+        ov = report["overall"]
+        print(f"[fairface] n={ov['n']} real FPR(verdict=fake)={ov['fpr_fake_verdict']} "
+              f"abstain={ov['abstain_rate']} mean_p_fake={ov['mean_p_fake']:.4f}")
+        for g, r in report["by_race"].items():
+            print(f"  {g:16s} n={r['n']:5d} fpr={r['fpr_fake_verdict']:.4f} abstain={r['abstain_rate']:.4f} "
+                  f"mean_p={r['mean_p_fake']:.4f}")
     else:
         ov = report["overall"]
         print(f"[sfhq_t2i] n={ov['n']} verdict=fake {ov['frac_verdict_fake']} abstain={ov['abstain_rate']} "

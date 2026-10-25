@@ -88,6 +88,10 @@ class DataConfig:
     sfhq_val_fraction: float = 0.2
     sfhq_max_per_generator_train: int | None = 8000
     sfhq_max_per_generator_val: int | None = 1000
+    ffhq_root: str | None = None  # FFHQ tars + index.json; adds real portraits to source=paired_faces
+    ffhq_val_fraction: float = 0.2
+    ffhq_max_train: int | None = 12000
+    ffhq_max_val: int | None = 3000
 
 
 @dataclass
