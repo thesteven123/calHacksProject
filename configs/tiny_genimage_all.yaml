@@ -1,0 +1,22 @@
+# Deployment general-image detector: full Tiny-GenImage, ALL 7 generators in training (no holdouts), conformal
+# calibration on the validation split. Unseen-generator performance is estimated by the 7-rotation nested LOGO runs
+# (configs/tiny_genimage_nested_full.yaml, mean AUC 0.915); this checkpoint is what the demo API serves.
+# CC-BY-NC-SA-4.0 training data: research / non-commercial use only.
+model:
+  backbone: facebook/dinov2-base
+  feature_layers: [4, 8, 10, 12]
+  lora_rank: 8
+  lora_blocks: 3
+data:
+  source: hf
+  hf_dataset: TheKernel01/Tiny-GenImage
+  hf_train_split: train
+  hf_val_split: validation
+  generator_column: generator
+  num_workers: 4
+train:
+  epochs: 2
+  batch_size: 32
+  log_every: 50
+  calibration_method: conformal
+  output_dir: runs/tiny_genimage_all

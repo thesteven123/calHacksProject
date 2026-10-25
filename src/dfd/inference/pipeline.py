@@ -129,6 +129,12 @@ class DetectionPipeline:
         return self._finalize(path, "image", logit, {**details, **crop_info})
 
     @torch.no_grad()
+    def score_pil(self, img: Image.Image, media_type: str = "image") -> Result:
+        """Stage-2 score + calibrated verdict for an in-memory image (no stage0/stage1)."""
+        logit, crop_info = self._score_image(img)
+        return self._finalize("", media_type, logit, crop_info)
+
+    @torch.no_grad()
     def predict_video(self, path: str | Path, n_keyframes: int = 16) -> Result:
         path = str(path)
         if self.crop_mode == "multi" and self.model.temporal is not None:

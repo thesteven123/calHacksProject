@@ -15,3 +15,6 @@ wandb/
 graphify-out/cache/
 graphify-out/.graphify_python
 graphify-out/.graphify_root
+
+# demo web build copy used for deploy (not committed; source lives in impl/demo-web)
+demo/web/dist/
