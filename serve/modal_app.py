@@ -53,7 +53,7 @@ hf_cache = modal.Volume.from_name("dfd-hf-cache", create_if_missing=True)
 GENERAL_CANDIDATES = ["/runs/general_all/config/best.pt",
                       "/runs/full7_dinov2_conformal/SD15-to-Midjourney/best.pt"]
 FACE_CKPT = "/runs/face_t2i_b3/config/best.pt"
-VIDEO_CKPT = "/runs/video_v2b_r2/config/best.pt"
+VIDEO_CKPT = "/runs/video_v3/config/best.pt"
 
 
 def _hf_secret() -> list:

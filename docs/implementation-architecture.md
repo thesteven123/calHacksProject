@@ -700,3 +700,30 @@ reenactment is not face swapping; and WildDeepfake frames are not aligned like t
 or fuse this checkpoint.** Next: train on in-the-wild data (WildDeepfake's own `*_train` split, Apache-2.0, with
 video-level disjointness from its test split) plus face-swap data (Celeb-DF, form pending), and align evaluation
 frames the same way as training frames.
+
+### 2026-10-25: video V2 → V2b → V3 (face-swap video), hosted demo
+
+**V2** (`configs/video_wdf.yaml`, PR #18): WildDeepfake `*_train` (7,314 clips extracted, 0 failures; clip IDs
+split-qualified after review found restarted numbering would mix train/test frames). It **collapsed** to a constant
+output (val AUC 0.476 → 0.500). Diagnosis (`scripts/modal_video_diag.py`): frames clean, frozen and LoRA backbone
+probes both AUC ≈ 0.83, but VIB `mu` std was exactly 0 (dead GELU layer; temporal mix norm 24.9 at head lr 1e-3).
+
+**V2b** (`configs/video_wdf_b.yaml`): head lr 2e-4, LoRA lr 5e-5, warm start from B3 (LoRA + head; temporal
+skipped). **V3** (`configs/video_wdf_v3.yaml`, PR #21): + Celeb-DF v2 train (YuNet ×1.3 face crops; crop fallback
+real 0.02% vs fake 0.00%; fakes capped ≤ 2:1 per target identity; groups = target identity), warm start from V2b.
+Checkpoint selection on validation only. All rows single-run, conformal thresholds from the training-side val split.
+
+| Model | WDF test (806) AUC | WDF real FPR / FNR / abstain | Celeb-DF test (518) AUC | Celeb-DF FPR / abstain | THB-cross AUC / real FPR / FNR |
+|---|---|---|---|---|---|
+| V2b | 0.867 | 0.0% / 1.5% / 75.8% | 0.761 | 1.7% / 91% | 0.385 / 0.9% / 27% |
+| **V3 (served)** | **0.877** | **0.5% / 1.0% / 75.4%** | **0.845** | **1.1% / 83%** | 0.441 / 0.0% / 41% |
+
+**Read-out:** both pass the serving gate (WDF real FPR ≤ 2%, AUC ≥ 0.75, no source false positives). V3 is served
+(decided before any further test scoring). Celeb-DF's official split shares swapped-in identities with train, so
+part of V3's Celeb-DF gain is in-domain. Neither covers talking-head animation; the API states this in every video
+response. Abstention (75–83%) is the main usability cost.
+
+**Hosted demo** (`serve/`, `demo/web/`, PRs #19, #20, #22): Modal app `dfd-demo` (scale-to-zero L4). Router: general
+image detector + AI-face detector on the largest YuNet face + clip-level face-swap video model; fake if any says fake,
+real only if all say real, else review. Video "real" also requires the video model to have run (face track in ≥ half
+the frames). Warm latency: image ≈ 70 ms server, video ≈ 0.6 s server; cold start ≈ 24 s.

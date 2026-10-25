@@ -37,7 +37,7 @@ class _ListClipDataset:
 
 
 class VideoClipScorer:
-    """Face-swap video specialist (temporal model, WildDeepfake-trained, e.g. video_v2b_r2).
+    """Face-swap video specialist (temporal model, WildDeepfake/Celeb-DF-trained, e.g. video_v3).
 
     Scores a whole clip through the SAME preprocessing as training/eval: YuNet 1.3x face crops
     -> encode_aligned -> pick_clip_frames + DetectorTransform(train=False) via a 1-item
@@ -266,7 +266,7 @@ class MultiDetector:
         faces = per_frame[top]["faces"]
         reasons = [f"{f['verdict']} ({f['p_fake']:.2f}) @ {f['t']}s" for f in frame_rows]
         reasons = ["Per-keyframe verdicts: " + "; ".join(reasons),
-                   "The video model is trained on face swaps (WildDeepfake); it does not cover "
+                   "The video model is trained on face swaps (WildDeepfake, Celeb-DF); it does not cover "
                    "talking-head animation."]
         if self.video_scorer is None or vrow is None:
             reasons += ["Video verdict is a frame-level heuristic (not clip-calibrated).",

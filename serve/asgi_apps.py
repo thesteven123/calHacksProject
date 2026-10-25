@@ -34,10 +34,12 @@ MODELS_INFO = {
          "metrics": {"held_out_flux_auc": 0.988, "fairface_real_fpr": 0.0058},
          "limitations": "Not a face-swap detector: WildDeepfake in-the-wild fakes score at chance."},
         {"name": "video", "title": "Face-swap video model",
-         "checkpoint": "video_v2b_r2",
-         "trained_on": "WildDeepfake face-swap clips (temporal adapter)",
-         "metrics": {"wdf_clip_auc": 0.867, "real_fpr": 0.0, "fnr": 0.015, "abstain": 0.758},
-         "limitations": "Detects face swaps, NOT talking-head animation (thb_cross AUC ~0.39)."},
+         "checkpoint": "video_v3",
+         "trained_on": "WildDeepfake + Celeb-DF v2 face-swap clips (temporal adapter)",
+         "metrics": {"wdf_clip_auc": 0.877, "wdf_real_fpr": 0.005, "wdf_fnr": 0.010, "wdf_abstain": 0.754,
+                     "celebdf_clip_auc": 0.845, "celebdf_real_fpr": 0.011, "celebdf_abstain": 0.834},
+         "limitations": "Detects face swaps, NOT talking-head animation (AUC 0.44; 41% of those fakes "
+                        "score real)."},
     ],
     "fusion": "fake if any specialist says fake; real only if all say real; else review",
     "notes": [
