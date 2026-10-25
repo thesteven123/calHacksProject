@@ -676,3 +676,27 @@ binomial + Holm tests against the 1% target, and empirical-Bayes-shrunk gaps.
    swap/reenactment and video training data are required (`research/video_datasets.md`).
 3. In-the-wild real-face FPR (WildDeepfake 2.4%) is still above target: low-resolution video face crops differ
    from every calibration source.
+
+### 2026-10-24 (later): video V1 — TalkingHeadBench vs CelebV-HQ, temporal training (negative transfer)
+
+**Setup** (`configs/video_thb_nested.yaml`, PR #16): TalkingHeadBench fakes (MIT; identity-disjoint splits) vs
+the 1,608 CelebV-HQ real clips named in THB's split file. Every clip is time-sampled (4 fps, 16 frames) and
+size-normalised (256 crop, JPEG q95); medians are 11–12 s for every class, so frame spacing is not a cue. Model:
+DINOv2 + LoRA + temporal adapter, 8 frames per clip with top-k pooling. Train on AniPortraitAudio / LivePortrait /
+Hallo / Hallo2, select on AniPortraitVideo, test on EmoPortrait. 2 epochs, L4, ≈ $0.13. Ingest + extraction ≈ $0.05
+(4,526 clips, 0 failures).
+
+| Set | AUC | TPR@1%FPR | Conformal FPR / FNR / abstain |
+|---|---|---|---|
+| Select: AniPortraitVideo (unseen) | 0.997 | 0.91 | – |
+| Test: EmoPortrait (unseen) | 0.990 | 0.79 | 0.6% / 4.1% / 13% |
+| **WildDeepfake clips (806), clip-level, calibrated** | **0.60** | 0.00 | **real-clip FPR 53.5%**, fake FNR 2.7%, abstain 34% |
+
+**Read-out:** the detector separates *this dataset pair* almost perfectly but has learned "not a CelebV-HQ-style
+512 px talking-head clip = fake". On in-the-wild face-swap clips (low-resolution 224 px crops, different capture
+and compression) it calls more than half of the **real** clips fake. That is the opposite of safe and far worse
+than the image detectors. Causes: THB fakes and CelebV-HQ reals come from one curated source pair; talking-head
+reenactment is not face swapping; and WildDeepfake frames are not aligned like the training frames. **Do not deploy
+or fuse this checkpoint.** Next: train on in-the-wild data (WildDeepfake's own `*_train` split, Apache-2.0, with
+video-level disjointness from its test split) plus face-swap data (Celeb-DF, form pending), and align evaluation
+frames the same way as training frames.
