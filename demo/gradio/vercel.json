@@ -1,0 +1,7 @@
+{
+  "functions": {
+    "api/index.py": { "maxDuration": 120 }
+  },
+  "rewrites": [{ "source": "/(.*)", "destination": "/api/index" }],
+  "env": { "GRADIO_ANALYTICS_ENABLED": "False" }
+}
