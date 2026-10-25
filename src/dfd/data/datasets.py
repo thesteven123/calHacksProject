@@ -12,6 +12,7 @@ from PIL import Image
 from torch.utils.data import Dataset
 
 from dfd.config import DataConfig
+from dfd.data.paired import CompositeDataset, DeepFakeFaceDataset, SowaibaDataset, verify_no_group_leakage
 from dfd.data.transforms import DetectorTransform
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
@@ -209,6 +210,31 @@ def _fake_generator_counts(val: Dataset) -> dict[str, int]:
     return counts
 
 
+def _row_groups(val: Dataset) -> tuple[list[int], dict[str, list[int]]]:
+    """Partition rows into singleton indices and multi-row pair groups.
+
+    Group id is `val.group(i)` when the dataset provides it (DeepFakeFace identity; CompositeDataset
+    prefixes it with the sub-dataset index), else `str(i)` so plain datasets stay singletons and the
+    split is byte-identical to the pre-grouping algorithm.
+    """
+    by_group: dict[str, list[int]] = {}
+    for i in range(len(val)):
+        gid = val.group(i) if hasattr(val, "group") else str(i)
+        by_group.setdefault(gid, []).append(i)
+    singles = [idxs[0] for idxs in by_group.values() if len(idxs) == 1]
+    multi = {g: idxs for g, idxs in by_group.items() if len(idxs) > 1}
+    return singles, multi
+
+
+def _fake_counts(val: Dataset, indices: list[int]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for i in indices:
+        label, gen = val.meta(i)
+        if label:
+            counts[gen] = counts.get(gen, 0) + 1
+    return counts
+
+
 def split_val_holdout(
     val: Dataset, holdout_generators: tuple[str, ...], seed: int = 0, test_real_frac: float = 0.5
 ) -> tuple[SubsetDataset, SubsetDataset]:
@@ -218,9 +244,15 @@ def split_val_holdout(
     `test`: held-out-generator fakes + the remaining reals. No selection decision touches it, so this is the
     honest leave-one-generator-out estimate. Reals are split (not shared) so FPR thresholds calibrated on
     selection reals are not re-scored on the same images. Without holdouts, test is empty.
+
+    Pair-group aware: a multi-row group (e.g. a DeepFakeFace real + its generated counterparts) is assigned
+    wholly to selection or test (seeded shuffle of sorted group ids, split by test_real_frac), keeping only
+    the fakes whose generator routes to that split so no identity leaks across selection/test. Singleton
+    rows follow the original per-row algorithm unchanged.
     """
+    singles, multi = _row_groups(val)
     sel, test_fakes, reals = [], [], []
-    for i in range(len(val)):
+    for i in singles:
         label, gen = val.meta(i)
         if label == 0:
             reals.append(i)
@@ -228,27 +260,56 @@ def split_val_holdout(
             test_fakes.append(i)
         else:
             sel.append(i)
+    test_reals: list[int] = []
+    if multi and not holdout_generators:
+        # No test split possible; every grouped row belongs to selection.
+        for idxs in multi.values():
+            sel.extend(idxs)
+        multi = {}
+    if multi:
+        order = np.random.default_rng(seed + 1).permutation(sorted(multi)).tolist()
+        n_test_groups = int(round(len(order) * test_real_frac))
+        test_groups = set(order[:n_test_groups])
+        dropped = 0
+        for g in order:
+            in_test = g in test_groups
+            for i in multi[g]:
+                label, gen = val.meta(i)
+                if label == 0:
+                    (test_reals if in_test else sel).append(i)
+                elif (gen in holdout_generators) == in_test:
+                    (test_fakes if in_test else sel).append(i)
+                else:
+                    dropped += 1
+        if dropped:
+            print(f"[split_val_holdout] dropped {dropped} pair-grouped fakes routed to the other split")
     if holdout_generators:
-        # Each configured holdout must match validation fakes (CODE_REVIEW 2026-10-24 + re-review).
-        _require_each_generator(_fake_generator_counts(val), "Holdout", tuple(holdout_generators))
+        # Each configured holdout must contribute fakes to the final test split (grouping can drop them).
+        _require_each_generator(_fake_counts(val, test_fakes), "Holdout", tuple(holdout_generators))
     if not test_fakes:
-        return SubsetDataset(val, sorted(sel + reals)), SubsetDataset(val, [])
+        return SubsetDataset(val, sorted(sel + reals + test_reals)), SubsetDataset(val, [])
     reals = np.random.default_rng(seed).permutation(reals).tolist()
     n_test_reals = int(round(len(reals) * test_real_frac))
-    return SubsetDataset(val, sorted(sel + reals[n_test_reals:])), SubsetDataset(val, sorted(test_fakes + reals[:n_test_reals]))
+    return (SubsetDataset(val, sorted(sel + reals[n_test_reals:])),
+            SubsetDataset(val, sorted(test_fakes + reals[:n_test_reals] + test_reals)))
 
 
 def split_nested_holdouts(
     val: Dataset, selection_generators: tuple[str, ...], test_generators: tuple[str, ...], seed: int = 0
 ) -> tuple[SubsetDataset, SubsetDataset, SubsetDataset]:
-    """Disjoint fit, OOD checkpoint-selection, and untouched final-test sets."""
+    """Disjoint fit, OOD checkpoint-selection, and untouched final-test sets.
+
+    Pair-group aware: a multi-row group is assigned wholly to fit/select/test (seeded shuffle of sorted
+    group ids, by thirds); within it all reals are kept plus only the fakes whose generator routes to
+    that split (selection generators -> select, test generators -> test, anything else -> fit). The
+    other fakes of the group are dropped so identities cannot leak across splits. Singleton rows follow
+    the original per-row algorithm unchanged.
+    """
     if not selection_generators or not test_generators or set(selection_generators) & set(test_generators):
         raise ValueError("Nested LOGO requires distinct, non-empty selection and test generator sets")
-    counts = _fake_generator_counts(val)
-    _require_each_generator(counts, "Selection", tuple(selection_generators))
-    _require_each_generator(counts, "Test", tuple(test_generators))
+    singles, multi = _row_groups(val)
     fit, selection, test, reals = [], [], [], []
-    for i in range(len(val)):
+    for i in singles:
         label, generator = val.meta(i)
         if not label:
             reals.append(i)
@@ -258,11 +319,42 @@ def split_nested_holdouts(
             test.append(i)
         else:
             fit.append(i)
-    if not (fit and selection and test and len(reals) >= 3):
+    if multi:
+        order = np.random.default_rng(seed + 1).permutation(sorted(multi)).tolist()
+        thirds = (len(order) // 3, 2 * len(order) // 3)
+        split_of = {}
+        for part, ids in zip((fit, selection, test),
+                             (order[:thirds[0]], order[thirds[0]:thirds[1]], order[thirds[1]:])):
+            for g in ids:
+                split_of[g] = part
+        dropped = 0
+        for g in order:
+            part = split_of[g]
+            for i in multi[g]:
+                label, generator = val.meta(i)
+                if label == 0:
+                    part.append(i)
+                    continue
+                required = (selection if generator in selection_generators
+                            else test if generator in test_generators else fit)
+                if required is part:
+                    part.append(i)
+                else:
+                    dropped += 1
+        if dropped:
+            print(f"[split_nested_holdouts] dropped {dropped} pair-grouped fakes routed to another split")
+    _require_each_generator(_fake_counts(val, selection), "Selection", tuple(selection_generators))
+    _require_each_generator(_fake_counts(val, test), "Test", tuple(test_generators))
+    n_fit_fakes = sum(1 for i in fit if val.meta(i)[0])
+    n_sel_fakes = sum(1 for i in selection if val.meta(i)[0])
+    n_test_fakes = sum(1 for i in test if val.meta(i)[0])
+    n_reals = len(reals) + sum(
+        1 for part in (fit, selection, test) for i in part if val.meta(i)[0] == 0)
+    if not (n_fit_fakes and n_sel_fakes and n_test_fakes and n_reals >= 3):
         seen = sorted({val.meta(i)[1] for i in fit + selection + test})
         raise ValueError(
             "Nested LOGO needs fake samples in each split and at least three real images: "
-            f"fit={len(fit)} select={len(selection)} test={len(test)} reals={len(reals)}; "
+            f"fit={n_fit_fakes} select={n_sel_fakes} test={n_test_fakes} reals={n_reals}; "
             f"selection={list(selection_generators)} test={list(test_generators)} generators present: {seen}"
         )
     reals = np.random.default_rng(seed).permutation(reals).tolist()
@@ -281,7 +373,16 @@ def eval_splits(cfg: DataConfig, base_val: Dataset, seed: int = 0) -> dict[str, 
     else:
         select, final = split_val_holdout(base_val, test, seed=seed)
         fit = select
-    return {"all": base_val, "fit": fit, "select": select, "test": final}
+    splits = {"all": base_val, "fit": fit, "select": select, "test": final}
+    if cfg.sowaiba_eval:
+        splits["sowaiba"] = SowaibaDataset(
+            root=cfg.sowaiba_root,
+            split="all",
+            seed=seed,
+            max_samples=cfg.max_val_samples,
+            download=(cfg.sowaiba_root is None),
+        )
+    return splits
 
 
 def build_base_datasets(cfg: DataConfig, seed: int = 0) -> tuple[Dataset, Dataset]:
@@ -305,4 +406,44 @@ def build_base_datasets(cfg: DataConfig, seed: int = 0) -> tuple[Dataset, Datase
             raise ValueError("data.folder_root is required for source=folder")
         root = Path(cfg.folder_root)
         return FolderDataset(root / "train", holdout), FolderDataset(root / "val")
+    if cfg.source == "paired_faces":
+        train_parts: list[Dataset] = []
+        val_parts: list[Dataset] = []
+        if cfg.hf_data_files or cfg.hf_dataset:
+            train_hf = HFImageDataset(cfg, cfg.hf_train_split, exclude_generators=holdout, max_samples=cfg.max_train_samples)
+            val_hf = HFImageDataset(cfg, cfg.hf_val_split, max_samples=cfg.max_val_samples)
+            train_parts.append(train_hf)
+            val_parts.append(val_hf)
+
+        dff_train_gens = tuple(g for g in cfg.dff_generators if g not in holdout)
+        dff_val_gens = tuple(cfg.dff_generators)
+
+        dff_train = DeepFakeFaceDataset(
+            root=cfg.dff_root,
+            generators=dff_train_gens,
+            include_reals=True,
+            split="train",
+            val_frac=cfg.dff_val_fraction,
+            format_align=cfg.dff_format_align,
+            seed=seed,
+            max_samples=cfg.max_train_samples,
+            download=(cfg.dff_root is None),
+        )
+        dff_val = DeepFakeFaceDataset(
+            root=cfg.dff_root,
+            generators=dff_val_gens,
+            include_reals=True,
+            split="val",
+            val_frac=cfg.dff_val_fraction,
+            format_align=cfg.dff_format_align,
+            seed=seed,
+            max_samples=cfg.max_val_samples,
+            download=(cfg.dff_root is None),
+        )
+        train_parts.append(dff_train)
+        val_parts.append(dff_val)
+
+        train = CompositeDataset(train_parts) if len(train_parts) > 1 else train_parts[0]
+        val = CompositeDataset(val_parts) if len(val_parts) > 1 else val_parts[0]
+        return train, val
     raise ValueError(f"Unknown data source: {cfg.source}")
