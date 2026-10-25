@@ -85,7 +85,10 @@ def main(argv: list[str] | None = None) -> dict:
     load_dotenv()
     ckpt = Path(args.checkpoint)
     run_dir = ckpt.parent
-    alphas = [float(a) for a in args.alphas.split(",") if a]
+    try:
+        alphas = [float(a) for a in args.alphas.split(",")]  # empty or non-numeric entries raise ValueError
+    except ValueError:
+        alphas = []
     if not alphas or any(not (np.isfinite(a) and 0.0 < a < 1.0) for a in alphas):
         ap.error(f"--alphas must be a comma list of values strictly between 0 and 1, got {args.alphas!r}")
     cfg = Config.from_yaml(run_dir / "config.yaml")
