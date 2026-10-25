@@ -234,6 +234,9 @@ def test_extract_tar_members(tmp_path):
     assert r == {"extracted": 2, "skipped": 0, "missing": ["zz"]}
     assert sorted(p.name for p in out.iterdir()) == ["a.mp4", "c.mp4"] and (out / "a.mp4").read_bytes() == b"aaa"
     assert mod.extract_tar_members(tar_path, {"a", "c"}, out)["skipped"] == 2
+    (out / "a.mp4").write_bytes(b"zzz")  # stale content, same size as the member
+    r = mod.extract_tar_members(tar_path, {"a", "c"}, out)
+    assert r["extracted"] == 1 and r["skipped"] == 1 and (out / "a.mp4").read_bytes() == b"aaa"
 
 
 def test_eval_external_temporal_wilddeepfake():

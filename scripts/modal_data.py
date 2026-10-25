@@ -198,9 +198,10 @@ def celebvhq_wanted(split_json: dict) -> set[str]:
 def extract_tar_members(tar_path: str | Path, wanted: set[str], out_dir: str | Path) -> dict:
     """Stream the tar once and copy only <...>/<stem>.mp4 members with stem in `wanted` to <out_dir>/<stem>.mp4.
 
-    Existing same-size files are skipped. Returns {extracted, skipped, missing (sorted stems never seen)}.
+    An existing file is skipped only if its sha256 equals the member's (the tar is streamed anyway, so hashing is
+    free); same-size changed content is rewritten. Returns {extracted, skipped, missing (sorted stems never seen)}.
     """
-    import shutil
+    import hashlib
     import tarfile
 
     out_dir = Path(out_dir)
@@ -213,12 +214,13 @@ def extract_tar_members(tar_path: str | Path, wanted: set[str], out_dir: str | P
                 continue
             seen.add(stem)
             dest = out_dir / f"{stem}.mp4"
-            if dest.exists() and dest.stat().st_size == m.size:
+            with tf.extractfile(m) as src:
+                data = src.read()
+            if dest.exists() and hashlib.sha256(dest.read_bytes()).digest() == hashlib.sha256(data).digest():
                 skipped += 1
                 continue
             tmp = dest.with_suffix(".mp4.part")
-            with tf.extractfile(m) as src, open(tmp, "wb") as dst:
-                shutil.copyfileobj(src, dst, 1 << 20)
+            tmp.write_bytes(data)
             tmp.replace(dest)
             extracted += 1
     return {"extracted": extracted, "skipped": skipped, "missing": sorted(wanted - seen)}
