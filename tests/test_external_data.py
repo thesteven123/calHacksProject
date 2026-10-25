@@ -25,6 +25,16 @@ from dfd.data.external import (
 from dfd.eval.metrics import report_to_markdown
 
 
+def _script(name: str):
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        name, Path(__file__).resolve().parents[1] / "scripts" / f"{name}.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
 def _img_bytes(color: int, size=(64, 48), fmt="PNG") -> bytes:
     bio = io.BytesIO()
     Image.fromarray(np.full((*size, 3), color, dtype=np.uint8)).save(bio, format=fmt)
@@ -198,12 +208,7 @@ def test_report_to_markdown_renders_eval_extra():
 
 
 def test_plan_files(tmp_path):
-    import importlib.util
-
-    spec = importlib.util.spec_from_file_location(
-        "modal_data", Path(__file__).resolve().parents[1] / "scripts" / "modal_data.py")
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
+    mod = _script("modal_data")
 
     tree = []
     for split in ("train", "test"):
@@ -235,3 +240,76 @@ def test_plan_files(tmp_path):
 
     assert mod.plan_files("sfhq_t2i", tree) == [("SyntheticFacesHighQuality-T2I.zip", 22_900_000_000)]
     assert mod.plan_files("sfhq_t2i", tree, smoke=True) == []
+
+
+def test_verdict_rates_respect_calibration_status():
+    from types import SimpleNamespace  # noqa: F401
+    from dfd.eval.calibration import Calibration
+
+    ee = _script("eval_external")
+    cal = Calibration(temperature=1.0, tau_fake=0.9, tau_real=0.1)
+    logits = np.array([-5.0, 5.0, 0.0])
+    labels = np.array([0, 1, 1])
+    m = ee._verdict_rates(cal, logits, labels, "matched")
+    assert m["verdicts_valid"] is True and m["calibration_status"] == "matched"
+    assert m["fpr_fake_verdict"] == 0.0 and m["fnr_real_verdict"] == 0.0 and m["abstain_rate"] == 1 / 3
+    for status in ("missing", "mismatched"):
+        r = ee._verdict_rates(cal, logits, labels, status)
+        assert r["abstain_rate"] == 1.0 and r["verdicts_valid"] is False
+        assert r["fpr_fake_verdict"] == 0.0 and r["fnr_real_verdict"] == 0.0
+        assert r["frac_verdict_fake"] == 0.0 and r["calibration_status"] == status
+
+
+def test_eval_wilddeepfake_clip_verdicts_omitted(tmp_path):
+    import torch
+    from types import SimpleNamespace
+
+    from dfd.eval.calibration import Calibration
+
+    ee = _script("eval_external")
+    root = _wilddeepfake_root(tmp_path)
+    write_wilddeepfake_index(root, build_wilddeepfake_index(root))
+    ds = WildDeepfakeDataset(root, frames_per_clip=4)
+
+    class _Model:
+        def __call__(self, pixels):
+            return {"logit": torch.zeros(len(pixels))}
+
+    pipe = SimpleNamespace(
+        model=_Model(),
+        transform=lambda img, rng: (torch.zeros(3, 8, 8), None),
+        cal=Calibration(temperature=1.0, tau_fake=0.9, tau_real=0.1),
+        calibration_status="matched",
+        device="cpu",
+    )
+    rep = ee._eval_wilddeepfake(pipe, ds, batch_size=4, num_workers=0)
+    assert rep["clip"]["verdicts"] is None and "single-image" in rep["clip"]["note"]
+    assert rep["clip"]["n_clips"] == 2
+    assert rep["frame"]["verdicts"]["verdicts_valid"] is True
+
+
+def test_eval_names():
+    mod = _script("modal_data")
+    assert mod._eval_names("all") == ["wilddeepfake", "sfhq_t2i"]
+    assert mod._eval_names("sfhq_t2i") == ["sfhq_t2i"]
+    with pytest.raises(SystemExit):
+        mod._eval_names("genimage")
+
+
+def test_download_files_always_calls_download_fn(tmp_path):
+    mod = _script("modal_data")
+    dest = tmp_path / "data"
+    files = [("x.bin", 4), ("y.bin", 4)]
+    (dest).mkdir(parents=True)
+    (dest / "x.bin").write_bytes(b"\x00" * 4)  # pre-existing same-size file must still be revalidated
+    calls = []
+
+    def fake_dl(repo_id, filename, repo_type, revision, local_dir):
+        calls.append((filename, revision))
+        p = Path(local_dir) / filename
+        if not p.exists():
+            p.write_bytes(b"\x01" * dict(files)[filename])
+
+    downloaded, reused, n_bytes = mod._download_files("repo", files, "sha123", dest, fake_dl)
+    assert [c[0] for c in calls] == ["x.bin", "y.bin"] and all(c[1] == "sha123" for c in calls)
+    assert (downloaded, reused, n_bytes) == (1, 1, 4)

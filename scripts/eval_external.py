@@ -37,12 +37,18 @@ class _Transformed(Dataset):
         return {"pixels": pixels, "label": label, "generator": gen, "idx": idx}
 
 
-def _verdict_rates(cal, logits, labels) -> dict:
+def _verdict_rates(cal, logits, labels, status: str) -> dict:
     labels = np.asarray(labels)
-    v = np.array([cal.verdict(p) for p in cal.prob(np.asarray(logits))])
     reals, fakes = labels == 0, labels == 1
+    if status == "matched":
+        v = np.array([cal.verdict(p) for p in cal.prob(np.asarray(logits))])
+    else:
+        # Thresholds were not fit on this score distribution: force abstain like DetectionPipeline._finalize.
+        v = np.array(["abstain"] * len(labels))
     return {
         "n": int(len(labels)),
+        "calibration_status": status,
+        "verdicts_valid": status == "matched",
         "abstain_rate": float((v == "abstain").mean()) if len(v) else None,
         "fpr_fake_verdict": float((v[reals] == "fake").mean()) if reals.any() else None,
         "fnr_real_verdict": float((v[fakes] == "real").mean()) if fakes.any() else None,
@@ -73,9 +79,11 @@ def _eval_wilddeepfake(pipe, ds, batch_size: int, num_workers: int) -> dict:
     clip_logits = np.array([float(logits[idx].mean()) for _, idx in sorted(by_clip.items())])
     clip_labels = np.array([int(round(float(labels[idx].mean()))) for _, idx in sorted(by_clip.items())])
     return {
-        "frame": {**binary_metrics(labels, logits), "verdicts": _verdict_rates(pipe.cal, logits, labels)},
+        "frame": {**binary_metrics(labels, logits),
+                  "verdicts": _verdict_rates(pipe.cal, logits, labels, pipe.calibration_status)},
         "clip": {**binary_metrics(clip_labels, clip_logits), "n_clips": len(by_clip),
-                 "verdicts": _verdict_rates(pipe.cal, clip_logits, clip_labels)},
+                 "verdicts": None,
+                 "note": "clip-level verdicts omitted: conformal thresholds are calibrated on single-image scores"},
     }
 
 
@@ -84,10 +92,11 @@ def _eval_sfhq(pipe, ds, batch_size: int, num_workers: int) -> dict:
     logits, labels = np.asarray(preds["logits"]), np.asarray(preds["labels"])
     gens = np.asarray(preds["generators"])
     per_gen = {g: {"n": int((gens == g).sum()),
-                   **_verdict_rates(pipe.cal, logits[gens == g], labels[gens == g]),
+                   **_verdict_rates(pipe.cal, logits[gens == g], labels[gens == g], pipe.calibration_status),
                    "mean_p_fake": float(pipe.cal.prob(logits[gens == g]).mean())}
                for g in sorted(set(gens))}
-    return {"overall": {"n": int(len(labels)), **_verdict_rates(pipe.cal, logits, labels),
+    return {"overall": {"n": int(len(labels)),
+                        **_verdict_rates(pipe.cal, logits, labels, pipe.calibration_status),
                         "mean_p_fake": float(pipe.cal.prob(logits).mean())},
             "by_generator": per_gen}
 
@@ -123,13 +132,16 @@ def main() -> None:
     out = Path(args.output or Path(args.checkpoint).with_name(f"eval_external_{args.dataset}.json"))
     out.write_text(json.dumps(report, indent=2))
 
+    if pipe.calibration_status != "matched":
+        print(f"[eval_external] WARNING: calibration_status={pipe.calibration_status!r} — "
+              "thresholds were not fit on this score distribution; all verdicts forced to abstain")
     if args.dataset == "wilddeepfake":
-        fv, cv = report["frame"]["verdicts"], report["clip"]["verdicts"]
+        fv = report["frame"]["verdicts"]
         fo, co = report["frame"], report["clip"]
         print(f"[wilddeepfake] frames n={fo['n']} auc={fo['auc']} tpr@1%fpr={fo['tpr@1%fpr']} "
               f"| real FPR(verdict=fake)={fv['fpr_fake_verdict']} abstain={fv['abstain_rate']}")
         print(f"[wilddeepfake] clips  n={co['n_clips']} auc={co['auc']} tpr@1%fpr={co['tpr@1%fpr']} "
-              f"| real FPR={cv['fpr_fake_verdict']} fake FNR={cv['fnr_real_verdict']} abstain={cv['abstain_rate']}")
+              "(uncalibrated discrimination; clip verdicts omitted)")
     else:
         ov = report["overall"]
         print(f"[sfhq_t2i] n={ov['n']} verdict=fake {ov['frac_verdict_fake']} abstain={ov['abstain_rate']} "

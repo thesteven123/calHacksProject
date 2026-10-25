@@ -29,6 +29,7 @@ DATASETS = {
     "sfhq_t2i": {"repo": "bitmind/SyntheticFacesHQ", "licence": "MIT", "dest": "/data/sfhq_t2i"},
 }
 SFHQ_ZIP = "SyntheticFacesHighQuality-T2I.zip"
+EVAL_DATASETS = ("wilddeepfake", "sfhq_t2i")
 GENIMAGE_DIRS = {"ADM": "ADM", "BigGAN": "BigGAN", "GLIDE": "glide", "Midjourney": "Midjourney",
                  "SD14": "stable_diffusion_v_1_4", "SD15": "stable_diffusion_v_1_5", "VQDM": "VQDM",
                  "Wukong": "wukong"}
@@ -118,12 +119,47 @@ def plan_files(dataset: str, tree: list[tuple[str, int]], generators: tuple[str,
     return out
 
 
-def _repo_tree(api, repo: str) -> tuple[str, list[tuple[str, int]]]:
+def _repo_tree(api, repo: str) -> tuple[str, list[tuple[str, int]], dict[str, str]]:
     info = api.dataset_info(repo)
-    files = [(f.path, int(f.size or 0))
-             for f in api.list_repo_tree(repo, repo_type="dataset", recursive=True)
-             if getattr(f, "size", None) is not None]
-    return info.sha, files
+    entries = [f for f in api.list_repo_tree(repo, repo_type="dataset", recursive=True)
+               if getattr(f, "size", None) is not None]
+    files = [(f.path, int(f.size)) for f in entries]
+    sha256s = {f.path: f.lfs.sha256 for f in entries
+               if getattr(getattr(f, "lfs", None), "sha256", None)}
+    return info.sha, files, sha256s
+
+
+def _eval_names(dataset: str) -> list[str]:
+    if dataset == "all":
+        return list(EVAL_DATASETS)
+    if dataset in EVAL_DATASETS:
+        return [dataset]
+    raise SystemExit(f"Unknown eval dataset {dataset!r}; supported: {list(EVAL_DATASETS)} or 'all'")
+
+
+def _download_files(repo: str, files: list[tuple[str, int]], revision: str, dest,
+                    download_fn, commit=None) -> tuple[int, int, int]:
+    """Download `files` into `dest` via hf_hub_download's local_dir path, which revalidates per-file
+    commit-hash/etag metadata instead of trusting size alone. Returns (downloaded, reused, bytes)."""
+    dest = Path(dest)
+    downloaded = reused = n_bytes = 0
+    for path, size in files:
+        local = dest / path
+        before = (local.stat().st_mtime_ns, local.stat().st_size) if local.exists() else None
+        download_fn(repo_id=repo, filename=path, repo_type="dataset",
+                    revision=revision, local_dir=str(dest))
+        if not local.exists() or local.stat().st_size != size:
+            raise IOError(f"Size mismatch after download: {local}")
+        if before is not None and before == (local.stat().st_mtime_ns, local.stat().st_size):
+            reused += 1
+        else:
+            downloaded += 1
+            n_bytes += size
+            if commit and downloaded % 20 == 0:
+                commit()
+    if commit:
+        commit()
+    return downloaded, reused, n_bytes
 
 
 def _plan(dataset: str, generators: tuple[str, ...], train_shards: int, smoke: bool) -> None:
@@ -133,7 +169,7 @@ def _plan(dataset: str, generators: tuple[str, ...], train_shards: int, smoke: b
     total = 0
     for name in ([dataset] if dataset != "all" else list(DATASETS)):
         spec = DATASETS[name]
-        sha, tree = _repo_tree(api, spec["repo"])
+        sha, tree, _ = _repo_tree(api, spec["repo"])
         files = plan_files(name, tree, generators, train_shards, smoke)
         size = sum(s for _, s in files)
         total += size
@@ -170,39 +206,26 @@ def _sfhq_smoke_counts(repo: str) -> None:
 @app.function(cpu=CPU_N, memory=MEM_MB, timeout=TIMEOUT_S,
               volumes={"/data": data_vol, "/cache": hf_cache}, secrets=_hf_secret())
 def ingest(dataset: str, files: list[tuple[str, int]], revision: str,
-           selection: dict) -> dict:
-    import os
-
+           selection: dict, sha256s: dict) -> dict:
     from huggingface_hub import hf_hub_download
 
     t0 = time.time()
     spec = DATASETS[dataset]
     dest = Path(spec["dest"])
-    done, skipped, n_bytes = 0, 0, 0
-    for i, (path, size) in enumerate(files):
-        local = dest / path
-        if local.exists() and local.stat().st_size == size:
-            skipped += 1
-            continue
-        hf_hub_download(repo_id=spec["repo"], filename=path, repo_type="dataset",
-                        revision=revision, local_dir=str(dest))
-        if not local.exists() or local.stat().st_size != size:
-            raise IOError(f"Size mismatch after download: {local}")
-        done += 1
-        n_bytes += size
-        if done % 20 == 0:
-            data_vol.commit()
+    downloaded, reused, n_bytes = _download_files(spec["repo"], files, revision, dest,
+                                                hf_hub_download, commit=data_vol.commit)
     if dataset == "wilddeepfake":
         from dfd.data.wilddeepfake_index import build_wilddeepfake_index, write_wilddeepfake_index
 
         write_wilddeepfake_index(dest, build_wilddeepfake_index(dest, split="test"), split="test")
     manifest = {"repo": spec["repo"], "revision": revision, "licence": spec["licence"],
-                "selection": selection, "files": [{"path": p, "size": s} for p, s in files],
+                "selection": selection,
+                "files": [{"path": p, "size": s, "sha256": sha256s.get(p)} for p, s in files],
                 "created_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
     (dest / "MANIFEST.json").write_text(json.dumps(manifest, indent=2))
     data_vol.commit()
     wall = time.time() - t0
-    return {"dataset": dataset, "downloaded": done, "skipped": skipped, "bytes": n_bytes,
+    return {"dataset": dataset, "downloaded": downloaded, "reused": reused, "bytes": n_bytes,
             "wall_s": round(wall, 1), "est_cost_usd": round(wall * CPU_PRICE_PER_S, 3)}
 
 
@@ -257,13 +280,16 @@ def main(action: str = "plan", dataset: str = "all", generators: str = "", train
                   f"~{total:.1f} GB created={mf.get('created_utc')}")
         print(f"[report] /data usage: { {k: f'{v / 1e9:.1f} GB' for k, v in r['bytes_by_dir'].items()} }")
         return
-    names = [dataset] if dataset != "all" else list(DATASETS)
     if action == "ingest":
+        names = [dataset] if dataset != "all" else list(DATASETS)
+        unknown = [n for n in names if n not in DATASETS]
+        if unknown:
+            raise SystemExit(f"Unknown dataset(s) {unknown}; supported: {list(DATASETS)} or 'all'")
         from huggingface_hub import HfApi
 
         api = HfApi()
         for name in names:
-            sha, tree = _repo_tree(api, DATASETS[name]["repo"])
+            sha, tree, sha256s = _repo_tree(api, DATASETS[name]["repo"])
             files = plan_files(name, tree, gens, train_shards, smoke)
             print(f"[ingest] {name}: {len(files)} files, {sum(s for _, s in files) / 1e9:.1f} GB")
             if not files:
@@ -271,19 +297,27 @@ def main(action: str = "plan", dataset: str = "all", generators: str = "", train
                     _sfhq_smoke_counts(DATASETS[name]["repo"])
                 continue
             r = ingest.remote(name, files, sha,
-                              {"generators": list(gens), "train_shards": train_shards, "smoke": smoke})
+                              {"generators": list(gens), "train_shards": train_shards, "smoke": smoke},
+                              sha256s)
             print(f"[ingest] {name}: {r}")
         return
     if action == "eval":
+        if not checkpoint:
+            raise SystemExit("--action eval requires --checkpoint (e.g. /runs/<tag>/<rotation>/best.pt)")
+        names = _eval_names(dataset)
         tag = tag or f"eval_{time.strftime('%Y%m%d-%H%M%S')}"
         local = PROJECT / "runs" / "modal" / tag
         local.mkdir(parents=True, exist_ok=True)
+        failed = []
         for name in names:
             r = eval_external.remote(name, checkpoint, frames_per_clip, max_per_generator or None)
             (local / f"eval_{name}.json").write_text(json.dumps(r, indent=2))
             print(f"[eval] {name}: rc={r['returncode']} ~${r['est_cost_usd']:.2f} -> {local / f'eval_{name}.json'}")
             if r["returncode"] != 0:
+                failed.append(name)
                 print(r["log_tail"][-1500:])
+        if failed:
+            raise SystemExit(f"eval failed for {failed} (see {local})")
         return
     raise SystemExit(f"Unknown action {action!r}; expected plan|ingest|report|eval")
 
