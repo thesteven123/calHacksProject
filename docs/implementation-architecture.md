@@ -568,3 +568,51 @@ rotation, **≈ $1.30 total (estimate)**.
     1:1 paired by identical relative path.
   - `Sowaiba01/Deepfake`: MIT, 5,352 metadata pairs, `inswapper_128`.
   - `kd13/deepfakebench-unfiltered` and `dbristow/inpaint_bench` (from research notes) **do not exist**.
+
+### 2026-10-24 (later): cloud datasets, first real-world evaluation, OOD gating (negative result)
+
+**Data storage** (`scripts/modal_data.py`, PR #9): datasets live on the Modal Volume `dfd-data` (`/data`), downloaded
+straight from the HF Hub on a CPU container at pinned revisions, with `MANIFEST.json` (repo, revision, licence,
+per-file size + LFS sha256). Re-runs revalidate through `hf_hub_download(local_dir=...)` metadata. Google Drive
+is backup only; Supabase/Neon are not used for images.
+
+| Dataset | Stored | Licence | Role |
+|---|---|---|---|
+| `xingjunm/WildDeepfake` (`*_test` only) | 9.9 GB | Apache-2.0 | eval only: in-the-wild face deepfakes (806 clips, 8 frames each) |
+| `bitmind/SyntheticFacesHQ` T2I zip | 22.9 GB | MIT (source repo) | DALL-E 3 / Flux dev, pro, schnell / SDXL faces, fakes only |
+| `nebula/GenImage-arrow` subset | 40.0 GB | CC-BY-NC-SA 4.0 | 8 generators: all test shards + 4 spread train shards each |
+
+Ingest cost ≈ $0.13 (CPU). Loaders: `dfd.data.external`, with the same square crop/resize/seeded JPEG for both
+classes, and real-image dedupe for GenImage.
+
+**First real-world evaluation** (`scripts/eval_external.py`, full-dataset 7-rotation checkpoints, centre crop,
+their own conformal calibration; nothing fitted on these sets; mean over 7 rotations):
+
+| Set | Result |
+|---|---|
+| WildDeepfake real faces | fake-verdict FPR **1.8%** mean, range 0.8–5.7% (ADM-to-Wukong worst) |
+| WildDeepfake fakes | 1.9–16% caught; frame AUC ≈ 0.64 (SD15-to-Midjourney) |
+| SFHQ DALL-E 3 | 63% caught, 0.9% labelled real |
+| SFHQ Flux dev / pro | 4.6% / 2.9% caught, **20.5% / 22.0% labelled real** (62–67% in the two rotations without Midjourney in training: Midjourney-to-GLIDE, SD15-to-Midjourney; 1–5% otherwise) |
+| SFHQ Flux schnell / SDXL | 19% / 16% caught, 7% labelled real |
+
+Read-out: the conformal FPR bound does **not** reliably transfer to in-the-wild face photos (calibration reals are
+transcoded ImageNet-style images, not faces). Detection of face swaps and Flux faces is weak, and Flux results
+swing heavily with which generators were in training.
+
+**OOD gating experiment** (`dfd.eval.ood`, `scripts/ood_gate_eval.py`, `modal_data.py --action ood`): fit a
+Ledoit-Wolf Gaussian on the VIB latent `mu` of fit-split reals and pick a split-conformal distance threshold;
+"real" verdicts beyond it become "abstain" (FPR unchanged by construction). 7 rotations, ≈ $0.63.
+
+| Mean over 7 rotations | Baseline | α = 0.05 | α = 0.10 |
+|---|---|---|---|
+| Reals gated (select / test) | – | 5.0% / 4.8% | 8.9% / 8.6% |
+| Unseen-generator FNR (test) | 6.6% | 6.4% | 6.3% |
+| Test reals abstained | 43.8% | 46.4% | 48.4% |
+| Flux-dev labelled real | 20.5% | 20.5% | 20.4% |
+| WildDeepfake fakes labelled real | 4.9% | 4.8% | 4.8% |
+| Distance AUC, test / WildDeepfake | – | 0.80 / 0.59 | 0.80 / 0.59 |
+
+Verdict: the coverage guarantee holds (≤ α of reals gated), but the benefit is negligible. The fakes the classifier
+calls "real" lie inside the real-latent cluster, so a post-hoc density check cannot recover them. **Not deployed**;
+the code stays as an experiment. The fix has to come from training data (face T2I run, next entry).

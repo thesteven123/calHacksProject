@@ -5,6 +5,7 @@
     .venv/bin/modal run scripts/modal_data.py --action report
     .venv/bin/modal run scripts/modal_data.py --action eval --dataset wilddeepfake \
         --checkpoint /runs/<tag>/<rotation>/best.pt
+    .venv/bin/modal run scripts/modal_data.py --action ood --run-tag full7_dinov2_conformal   # OOD-gate experiment
 
 Volume layout: /data/genimage/data/<split>/<DIR>/..., /data/wilddeepfake/deepfake_in_the_wild/... (+index_test.json),
 /data/sfhq_t2i/SyntheticFacesHighQuality-T2I.zip. Each dataset dir gets MANIFEST.json with the pinned revision sha.
@@ -263,10 +264,34 @@ def eval_external(dataset: str, checkpoint: str, frames_per_clip: int, max_per_g
             "log_tail": (proc.stdout + proc.stderr)[-4000:]}
 
 
+@app.function(gpu="L4", cpu=8.0, memory=32768, timeout=2 * 3600, image=gpu_image,
+              volumes={"/data": data_vol, "/runs": runs_vol, "/cache": hf_cache}, secrets=_hf_secret())
+def ood_gate_eval(checkpoint: str, alphas: str, frames_per_clip: int, max_per_generator: int) -> dict:
+    import subprocess
+
+    t0 = time.time()
+    out_path = str(Path(checkpoint).with_name("ood_gate_eval.json"))
+    cmd = ["python", f"{REMOTE}/scripts/ood_gate_eval.py", "--checkpoint", checkpoint, "--alphas", alphas,
+           "--data-root", "/data", "--output", out_path, "--frames-per-clip", str(frames_per_clip),
+           "--max-per-generator", str(max_per_generator), "--num-workers", "6"]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    runs_vol.commit()
+    return {"checkpoint": checkpoint, "returncode": proc.returncode,
+            "wall_s": round(time.time() - t0, 1), "est_cost_usd": round((time.time() - t0) * GPU_PRICE_PER_S, 3),
+            "report": json.loads(Path(out_path).read_text()) if Path(out_path).exists() else None,
+            "log_tail": (proc.stdout + proc.stderr)[-4000:]}
+
+
+def _run_checkpoints(run_tag: str) -> list[str]:
+    """Every /runs/<run_tag>/*/best.pt on the dfd-runs volume (listed from the client, no compute)."""
+    return sorted(f"/runs/{e.path.lstrip('/')}" for e in runs_vol.listdir(run_tag, recursive=True)
+                  if e.path.endswith("/best.pt") and e.path.lstrip("/").count("/") == 2)
+
+
 @app.local_entrypoint()
 def main(action: str = "plan", dataset: str = "all", generators: str = "", train_shards: int = 4,
          smoke: bool = False, checkpoint: str = "", frames_per_clip: int = 8,
-         max_per_generator: int = 2000, tag: str = ""):
+         max_per_generator: int = 2000, tag: str = "", run_tag: str = "", alphas: str = "0.05,0.10"):
     gens = tuple(g for g in generators.split(",") if g)
     if action == "plan":
         _plan(dataset, gens, train_shards, smoke)
@@ -319,7 +344,36 @@ def main(action: str = "plan", dataset: str = "all", generators: str = "", train
         if failed:
             raise SystemExit(f"eval failed for {failed} (see {local})")
         return
-    raise SystemExit(f"Unknown action {action!r}; expected plan|ingest|report|eval")
+    if action == "ood":
+        if bool(checkpoint) == bool(run_tag):
+            raise SystemExit("--action ood requires exactly one of --checkpoint or --run-tag")
+        ckpts = [checkpoint] if checkpoint else _run_checkpoints(run_tag)
+        if not ckpts:
+            raise SystemExit(f"No /runs/{run_tag}/*/best.pt found on the dfd-runs volume")
+        if len(ckpts) > 7:
+            raise SystemExit(f"{len(ckpts)} checkpoints exceed the 7-job cap: {ckpts}")
+        tag = tag or run_tag or f"ood_{time.strftime('%Y%m%d-%H%M%S')}"
+        local = PROJECT / "runs" / "modal" / tag
+        local.mkdir(parents=True, exist_ok=True)
+        args = [(c, alphas, frames_per_clip, max_per_generator) for c in ckpts]
+        failed = []
+        for c, r in zip(ckpts, ood_gate_eval.starmap(args, return_exceptions=True)):
+            rotation = Path(c).parent.name
+            path = local / f"ood_{rotation}.json"
+            if isinstance(r, BaseException):
+                path.write_text(json.dumps({"checkpoint": c, "error": f"{type(r).__name__}: {r}"}, indent=2))
+                failed.append(rotation)
+                print(f"[ood] {rotation}: EXCEPTION {type(r).__name__}: {r}")
+                continue
+            path.write_text(json.dumps(r, indent=2))
+            print(f"[ood] {rotation}: rc={r['returncode']} ~${r['est_cost_usd']:.2f} -> {path}")
+            if r["returncode"] != 0:
+                failed.append(rotation)
+                print(r["log_tail"][-1500:])
+        if failed:
+            raise SystemExit(f"ood eval failed for {failed} (see {local})")
+        return
+    raise SystemExit(f"Unknown action {action!r}; expected plan|ingest|report|eval|ood")
 
 
 if __name__ == "__main__":
