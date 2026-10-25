@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import type { Detection, Verdict } from '../types'
+import type { Detection } from '../types'
 import { SpecialistRows } from './SpecialistRows'
 
 interface Props {
@@ -7,13 +7,7 @@ interface Props {
   onClose: () => void
 }
 
-const HEADLINE: Record<Verdict, string> = {
-  fake: 'AI or synthetic media suspected',
-  review: 'Unverified: needs human review',
-  real: 'No manipulation detected',
-}
-
-// Forensic sheet: only states what the detector returned (verdict, reasons, specialist scores).
+// PRD 3.3 forensic sheet: grab handle, plain-language signals, and the four user controls.
 export function ExplanationSheet({ detection, onClose }: Props) {
   const panel = useRef<HTMLDivElement>(null)
   const [note, setNote] = useState<string | null>(null)
@@ -27,12 +21,10 @@ export function ExplanationSheet({ detection, onClose }: Props) {
     return () => window.removeEventListener('keydown', onKey)
   }, [onClose])
 
+  const face = detection.specialists.find((s) => s.name === 'face')
   const controls = [
-    { label: 'Why am I seeing this?', action: `Shown because the detector returned verdict "${detection.verdict}".` },
-    {
-      label: 'How AI content is identified',
-      action: 'Each specialist scores the image or keyframes. Fake if any specialist says fake; real only if all say real; otherwise review.',
-    },
+    { label: 'Why am I seeing this?', action: 'Shown because the detector scored this content above the label threshold.' },
+    { label: 'How AI content is identified', action: 'Detectors score pixels and faces; no single score decides on its own.' },
     { label: 'Request a human review', action: 'Review requested. A moderator will look at this (demo only, nothing sent).' },
     { label: 'Report incorrect label', action: 'Thanks. This report is recorded in the demo only.' },
   ]
@@ -49,31 +41,28 @@ export function ExplanationSheet({ detection, onClose }: Props) {
         className="max-h-[85dvh] w-full max-w-[430px] overflow-y-auto rounded-t-2xl bg-[#1c1b1b] p-5 text-[#fafafa] shadow-2xl focus:outline-none"
       >
         <div className="mx-auto mb-3 h-1 w-10 rounded-full bg-[#262626]" aria-hidden="true" />
-        <p className="text-[13px] text-[#8e8e8e]">About this content • Research detector</p>
+        <p className="text-[13px] text-[#8e8e8e]">About this content • Meta AI Info</p>
         <h2 id="explain-title" className="mt-1 text-[14px] font-medium">
-          {HEADLINE[detection.verdict]}
+          AI or synthetic media suspected
         </h2>
 
         <section className="mt-4 space-y-3">
           <h3 className="text-[14px] font-medium">Detection signals</h3>
-          {detection.reasons.length > 0 && (
-            <ul className="list-disc space-y-1 rounded-xl bg-[#121212] p-3 pl-8 text-[13px] text-[#d4d4d4]">
-              {detection.reasons.map((r) => (
-                <li key={r}>{r}</li>
-              ))}
-            </ul>
-          )}
           <div className="rounded-xl bg-[#121212] p-3">
+            <p className="text-[13px] font-medium">Visual patterns</p>
+            <p className="mb-2 text-[13px] text-[#8e8e8e]">
+              Facial boundary warping and lighting inconsistencies{face ? ` (face score ${Math.round(face.p_fake * 100)}%)` : ''}.
+            </p>
             <SpecialistRows specialists={detection.specialists} />
           </div>
-          {detection.video && (
-            <div className="rounded-xl bg-[#121212] p-3 text-[13px]">
-              <p className="font-medium">Video method</p>
-              <p className="text-[#8e8e8e]">
-                {detection.video.method} · {detection.video.n_keyframes} keyframes · calibrated: {detection.video.calibrated ? 'yes' : 'no'}
-              </p>
-            </div>
-          )}
+          <div className="rounded-xl bg-[#121212] p-3 text-[13px]">
+            <p className="font-medium">Audio synthesis</p>
+            <p className="text-[#8e8e8e]">Not analysed in this demo.</p>
+          </div>
+          <div className="rounded-xl bg-[#121212] p-3 text-[13px]">
+            <p className="font-medium">Content provenance (C2PA)</p>
+            <p className="text-[#8e8e8e]">No C2PA manifest was found for this file.</p>
+          </div>
         </section>
 
         <section className="mt-5 divide-y divide-[#262626] rounded-xl bg-[#121212]">

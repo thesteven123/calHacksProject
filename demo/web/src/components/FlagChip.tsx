@@ -1,16 +1,16 @@
 import type { Detection } from '../types'
 
 export interface Badge {
-  kind: 'altered' | 'suspected' | 'review'
+  kind: 'altered' | 'suspected'
   text: string
 }
 
-// Badge follows the API verdict only: fake -> AI labels, review -> neutral "Unverified", real -> none.
+// PRD 5: <50% no badge; 50-79% "Altered with AI"; >=80% on a fake verdict -> "Suspected Deepfake".
 export function badgeFor(d: Detection): Badge | null {
   if (d.verdict === 'real') return null
-  if (d.verdict === 'review') return { kind: 'review', text: 'Unverified' }
-  if (d.confidence >= 0.8) return { kind: 'suspected', text: 'Suspected Deepfake' }
-  return { kind: 'altered', text: 'Altered with AI' }
+  if (d.verdict === 'fake' && d.confidence >= 0.8) return { kind: 'suspected', text: 'Suspected Deepfake' }
+  if (d.confidence >= 0.5) return { kind: 'altered', text: 'Altered with AI' }
+  return null
 }
 
 interface Props {
@@ -31,17 +31,16 @@ const Shield = () => (
   </svg>
 )
 
-// Home/Explore uses the inline tag; Reels uses the shield overlay with a drop shadow (no pill).
+// Home/Explore uses the inline blue tag; Reels uses the shield overlay with a drop shadow (no pill).
 export function FlagChip({ badge, onOpen, variant }: Props) {
   if (!badge) return null
-  const review = badge.kind === 'review'
   if (variant === 'overlay') {
     return (
       <button
         type="button"
         onClick={onOpen}
         aria-label={`${badge.text}: open forensic details`}
-        className={`flex items-center gap-1.5 text-sm font-semibold drop-shadow-[0_1px_3px_rgba(0,0,0,0.9)] focus:outline-none focus-visible:ring-2 focus-visible:ring-white ${review ? 'text-neutral-300' : 'text-white'}`}
+        className="flex items-center gap-1.5 text-sm font-semibold text-white drop-shadow-[0_1px_3px_rgba(0,0,0,0.9)] focus:outline-none focus-visible:ring-2 focus-visible:ring-white"
       >
         <Shield />
         {badge.text}
@@ -53,11 +52,9 @@ export function FlagChip({ badge, onOpen, variant }: Props) {
       type="button"
       onClick={onOpen}
       aria-label={`${badge.text}: open forensic details`}
-      className={`inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-xs font-medium focus:outline-none focus-visible:ring-2 ${
-        review ? 'bg-neutral-500/20 text-neutral-300 focus-visible:ring-neutral-400' : 'bg-[#0095F6]/15 text-[#0095F6] focus-visible:ring-[#0095F6]'
-      }`}
+      className="inline-flex items-center gap-1 rounded-md bg-[#0095F6]/15 px-2 py-0.5 text-xs font-medium text-[#0095F6] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#0095F6]"
     >
-      {!review && <Sparkle />}
+      <Sparkle />
       {badge.text}
     </button>
   )

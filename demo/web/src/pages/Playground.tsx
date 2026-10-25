@@ -89,7 +89,6 @@ export function Playground() {
         { id: pendingId, role: 'pending' },
       ])
       const detection = await run(file)
-      if (!detection) URL.revokeObjectURL(url)
       setMessages((m) =>
         m.map((x) =>
           x.id !== pendingId
