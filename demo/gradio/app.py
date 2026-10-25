@@ -12,6 +12,7 @@ This is a research demo and not for enforcement decisions.
 """
 
 EMPTY = "Upload a file and press **Scan**."
+SIZE_NOTE = "_Hosted on Vercel, requests over about 4.5 MB fail before they reach the detector. Compress large files first._"
 
 
 def annotate(path: str, faces: list[dict]) -> Image.Image | None:
@@ -75,6 +76,7 @@ def build_ui() -> gr.Blocks:
     with gr.Blocks(title="DFD detector") as demo:
         gr.Markdown(HEADER)
         gr.Markdown(f"_{backend_mode()}_")
+        gr.Markdown(SIZE_NOTE)
         with gr.Row():
             with gr.Column(scale=1):
                 upload = gr.File(label="Image or video", file_types=ACCEPT_TYPES, type="filepath")
