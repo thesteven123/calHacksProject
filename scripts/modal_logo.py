@@ -62,7 +62,8 @@ def _hf_secret() -> list:
 
 
 @app.function(gpu=GPU, cpu=CPU, memory=MEM_MB, timeout=TIMEOUT_S, max_containers=MAX_PARALLEL,
-              volumes={"/cache": hf_cache, "/runs": runs_vol, "/data": data_vol}, secrets=_hf_secret())
+              volumes={"/cache": hf_cache, "/runs": runs_vol, "/data": data_vol}, secrets=_hf_secret(),
+              retries=modal.Retries(max_retries=1, initial_delay=10.0, backoff_coefficient=1.0))
 def train_rotation(selection: str, test: str, backbone: str, epochs: int, tag: str, base_config: str) -> dict:
     import subprocess
 

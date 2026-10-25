@@ -290,7 +290,7 @@ def test_eval_wilddeepfake_clip_verdicts_omitted(tmp_path):
 
 def test_eval_names():
     mod = _script("modal_data")
-    assert mod._eval_names("all") == ["wilddeepfake", "sfhq_t2i"]
+    assert mod._eval_names("all") == ["wilddeepfake", "sfhq_t2i", "fairface"]
     assert mod._eval_names("sfhq_t2i") == ["sfhq_t2i"]
     with pytest.raises(SystemExit):
         mod._eval_names("genimage")

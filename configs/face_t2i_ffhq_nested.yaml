@@ -1,0 +1,55 @@
+# B3: face-only text-to-image training (SFHQ-T2I fakes + DeepFakeFace and FFHQ real faces), nested LOGO.
+#
+# Training:
+#   - DeepFakeFace (OpenRL/DeepFakeFace): IMDB-WIKI reals + inpainting/insight/text2img fakes (pair-grouped)
+#   - SFHQ-T2I (bitmind/SyntheticFacesHQ) md5 train split: SDXL is the ONLY SFHQ generator in train
+#   - FFHQ (gaunernst/ffhq-1024-wds) md5 train split: second real-face source in SFHQ-like portrait framing,
+#     against the portrait-style shortcut B1 showed (more false alarms on WildDeepfake/Sowaiba reals)
+#   - No Tiny-GenImage (hf_dataset: null)
+# Checkpoint Selection:
+#   - DALLE3 (SFHQ-T2I val split, unseen in training); FFHQ val reals join the real pool of every split
+# Holdout Evaluation (untouched test):
+#   - FLUX1-dev / FLUX1-pro / FLUX1-schnell (SFHQ-T2I val split): generalisation to an unseen modern family
+#   - inswapper_128 (Sowaiba01/Deepfake extra split)
+#
+# Format-shortcut guard: SFHQ fakes and FFHQ reals get the same alignment as DeepFakeFace rows (centre square crop ->
+# 384x384 BICUBIC -> JPEG 4:2:0, md5-seeded quality 85..95), so dff_format_align must stay true.
+# SFHQ and FFHQ live on the dfd-data Modal volume (scripts/modal_data.py --action ingest --dataset sfhq_t2i|ffhq).
+
+model:
+  backbone: facebook/dinov2-base
+  feature_layers: [4, 8, 10, 12]
+  lora_rank: 8
+  lora_blocks: 3
+
+data:
+  source: paired_faces
+  hf_dataset: null
+
+  dff_generators: [inpainting, insight, text2img]
+  dff_val_fraction: 0.2
+
+  sfhq_zip: /data/sfhq_t2i/SyntheticFacesHighQuality-T2I.zip
+  sfhq_val_fraction: 0.2
+  sfhq_max_per_generator_train: 8000
+  sfhq_max_per_generator_val: 1000
+
+  ffhq_root: /data/ffhq
+  ffhq_max_train: 12000
+  ffhq_max_val: 3000
+
+  selection_generators: [DALLE3]
+  holdout_generators: [FLUX1-dev, FLUX1-pro, FLUX1-schnell]
+  sowaiba_eval: true
+
+  num_workers: 6
+
+train:
+  epochs: 2
+  batch_size: 32
+  lr: 0.001
+  lora_lr: 0.0002
+  weight_decay: 0.05
+  log_every: 10
+  calibration_method: conformal
+  output_dir: runs/face_t2i_ffhq_nested

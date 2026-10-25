@@ -616,3 +616,32 @@ Ledoit-Wolf Gaussian on the VIB latent `mu` of fit-split reals and pick a split-
 Verdict: the coverage guarantee holds (≤ α of reals gated), but the benefit is negligible. The fakes the classifier
 calls "real" lie inside the real-latent cluster, so a post-hoc density check cannot recover them. **Not deployed**;
 the code stays as an experiment. The fix has to come from training data (face T2I run, next entry).
+
+### 2026-10-24 (later): face T2I training (SFHQ-T2I fakes, Flux held out)
+
+**Setup** (`configs/face_t2i_nested.yaml`, PR #11, run B1): `source: paired_faces` without Tiny-GenImage.
+- Train: DeepFakeFace (IMDB-WIKI reals + inpainting/insight/text2img fakes, pair-grouped) plus SFHQ-T2I SDXL
+  (8,000; md5 80/20 split).
+- Select: DALL-E 3. Test: FLUX1-dev/pro/schnell, never trained on.
+- SFHQ rows get pixel-identical alignment to DeepFakeFace (384 centre crop, BICUBIC, JPEG 4:2:0 q85–95; asserted
+  in tests).
+- 2 epochs, L4, ≈ $0.9.
+
+| B1 | Result |
+|---|---|
+| Held-out Flux vs DeepFakeFace val reals | AUC **0.988**, TPR@1%FPR **0.84** (dev 0.76, pro 0.86, schnell 0.91); conformal FPR 0.65%, FNR 0.5%, abstain 29% |
+| SFHQ val split, verdicts (`eval_external --sfhq-split val`) | Flux-dev / pro / schnell caught **56% / 67% / 74%**, labelled real ≤ 1% (7-rotation baseline: 4.6% / 2.9% / 19% caught, 20.5% / 22% / 7% real) |
+| Sowaiba (inswapper) | AUC 0.798; **real-face FPR 3.3%** |
+| WildDeepfake | frame AUC 0.638 (unchanged); **real-face FPR 4.3%** (baseline 0.9–1.8%) |
+
+**Read-out:**
+- Modern face data is what was missing for Flux.
+- However, false alarms on real faces from *other* sources rose. SFHQ fakes share one curation/prompt style and all
+  training reals come from IMDB-WIKI, so part of the gain is plausibly a dataset-style shortcut. The Flux holdout
+  cannot rule this out, because Flux images share the SFHQ style.
+- Not a deployment candidate. The next run (B3) adds FFHQ portraits as a second real-face source and FairFace as a
+  demographic real-face FPR check.
+
+**Ops:** run B2 (B1 + Tiny-GenImage) was lost twice: once to a local heartbeat timeout (client disconnect cancels
+an ephemeral app) and once to a Modal-side cancellation during an L4 capacity shortage. Long jobs now use
+`modal run --detach`, and `train_rotation` retries once.
