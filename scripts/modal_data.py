@@ -166,24 +166,34 @@ def _eval_names(dataset: str) -> list[str]:
 
 
 def _download_files(repo: str, files: list[tuple[str, int]], revision: str, dest,
-                    download_fn, commit=None) -> tuple[int, int, int]:
+                    download_fn, commit=None, workers: int = 8, commit_every: int = 200) -> tuple[int, int, int]:
     """Download `files` into `dest` via hf_hub_download's local_dir path, which revalidates per-file
-    commit-hash/etag metadata instead of trusting size alone. Returns (downloaded, reused, bytes)."""
+    commit-hash/etag metadata instead of trusting size alone. Returns (downloaded, reused, bytes).
+
+    Files are fetched by `workers` threads (per-file HTTP overhead dominates for many small files); the volume is
+    committed from this thread every `commit_every` new downloads and at the end."""
+    from concurrent.futures import ThreadPoolExecutor
+
     dest = Path(dest)
-    downloaded = reused = n_bytes = 0
-    for path, size in files:
+
+    def fetch(item: tuple[str, int]) -> bool:
+        path, size = item
         local = dest / path
         before = (local.stat().st_mtime_ns, local.stat().st_size) if local.exists() else None
-        download_fn(repo_id=repo, filename=path, repo_type="dataset",
-                    revision=revision, local_dir=str(dest))
+        download_fn(repo_id=repo, filename=path, repo_type="dataset", revision=revision, local_dir=str(dest))
         if not local.exists() or local.stat().st_size != size:
             raise IOError(f"Size mismatch after download: {local}")
-        if before is not None and before == (local.stat().st_mtime_ns, local.stat().st_size):
-            reused += 1
-        else:
+        return before is not None and before == (local.stat().st_mtime_ns, local.stat().st_size)
+
+    downloaded = reused = n_bytes = 0
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+        for (path, size), was_reused in zip(files, pool.map(fetch, files)):
+            if was_reused:
+                reused += 1
+                continue
             downloaded += 1
             n_bytes += size
-            if commit and downloaded % 20 == 0:
+            if commit and downloaded % commit_every == 0:
                 commit()
     if commit:
         commit()
