@@ -25,9 +25,9 @@ export function truthTag(post: PostView): { text: string; tone: string } | null 
 
 export const YOU = { handle: 'you', avatar: '/media/avatars/a06.jpg', source: 'Your upload' }
 
-// Account-level heuristic from PRD 5: >60% flagged posts -> "Suspected AI" pill on the profile.
+// Account-level heuristic from PRD 5: >60% posts with a fake verdict -> "Suspected AI" pill (review does not count).
 export function flaggedShare(posts: PostView[], handle: string): { flagged: number; total: number; suspected: boolean } {
   const mine = posts.filter((p) => p.handle === handle)
-  const flagged = mine.filter((p) => p.detection.flag !== 'none').length
+  const flagged = mine.filter((p) => p.detection.verdict === 'fake').length
   return { flagged, total: mine.length, suspected: mine.length > 0 && flagged / mine.length > 0.6 }
 }
