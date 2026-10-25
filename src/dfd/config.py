@@ -53,7 +53,12 @@ class PTEConfig:
 
 @dataclass
 class DataConfig:
-    source: str = "synthetic"  # synthetic | hf | folder
+    source: str = "synthetic"  # synthetic | hf | folder | genimage_arrow
+    data_root: str = "/data"  # root of the dfd-data Modal volume (local mirror path for non-Modal runs)
+    genimage_generators: tuple[str, ...] = ()  # empty = all 8 canonical generators
+    genimage_train_shards_per_generator: int = 4
+    genimage_val_shards_per_generator: int | None = None
+    align_size: int = 256
     hf_dataset: str = "TheKernel01/Tiny-GenImage"
     hf_data_files: dict[str, Any] | None = None
     hf_train_split: str = "train"

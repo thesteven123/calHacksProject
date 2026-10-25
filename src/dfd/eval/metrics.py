@@ -81,6 +81,14 @@ def report_to_markdown(report: dict[str, Any], title: str = "Evaluation report")
         if report.get(section):
             lines += ["", f"## {section.replace('_', ' ').title()}", *table(report[section])]
     for section, rows in report.items():
-        if section.startswith("eval_") and isinstance(rows, dict):
+        if not (section.startswith("eval_") and isinstance(rows, dict)):
+            continue
+        if "overall" in rows:
             lines += ["", f"## {section}", *table({"overall": rows["overall"], **rows.get("by_generator", {})})]
+            continue
+        for name, sub in rows.items():  # e.g. eval_extra = {split: {"report": {...}, ...}}
+            rep = sub.get("report", sub) if isinstance(sub, dict) else {}
+            if isinstance(rep, dict) and "overall" in rep:
+                lines += ["", f"## {section}/{name}",
+                          *table({"overall": rep["overall"], **rep.get("by_generator", {})})]
     return "\n".join(lines) + "\n"

@@ -1,0 +1,22 @@
+# GenImage-arrow (nebula/GenImage-arrow, CC-BY-NC-SA-4.0, research only) from the dfd-data volume,
+# nested LOGO + conformal calibration. Same model/train settings as tiny_genimage_nested_full.yaml;
+# data.source genimage_arrow reads aligned leaf bundles under /data/genimage (see scripts/modal_data.py).
+model:
+  backbone: facebook/dinov2-base
+  feature_layers: [4, 8, 10, 12]
+  lora_rank: 8
+  lora_blocks: 3
+data:
+  source: genimage_arrow
+  data_root: /data
+  genimage_generators: [ADM, BigGAN, GLIDE, Midjourney, SD14, SD15, VQDM, Wukong]
+  genimage_train_shards_per_generator: 4
+  selection_generators: [GLIDE]
+  holdout_generators: [Midjourney]
+  num_workers: 6
+train:
+  epochs: 2
+  batch_size: 32
+  log_every: 50
+  calibration_method: conformal
+  output_dir: runs/genimage_arrow_nested
