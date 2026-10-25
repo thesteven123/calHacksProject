@@ -45,6 +45,9 @@ image = (
 app = modal.App("dfd-logo", image=image)
 hf_cache = modal.Volume.from_name("dfd-hf-cache", create_if_missing=True)
 runs_vol = modal.Volume.from_name("dfd-runs", create_if_missing=True)
+data_vol = modal.Volume.from_name("dfd-data", create_if_missing=True)
+# All 8 GenImage-arrow generators (incl. SD14, absent only from Tiny-GenImage).
+GENIMAGE_GENERATORS = ["ADM", "BigGAN", "GLIDE", "Midjourney", "SD14", "SD15", "VQDM", "Wukong"]
 
 
 def _hf_secret() -> list:
@@ -59,7 +62,7 @@ def _hf_secret() -> list:
 
 
 @app.function(gpu=GPU, cpu=CPU, memory=MEM_MB, timeout=TIMEOUT_S, max_containers=MAX_PARALLEL,
-              volumes={"/cache": hf_cache, "/runs": runs_vol}, secrets=_hf_secret())
+              volumes={"/cache": hf_cache, "/runs": runs_vol, "/data": data_vol}, secrets=_hf_secret())
 def train_rotation(selection: str, test: str, backbone: str, epochs: int, tag: str, base_config: str) -> dict:
     import subprocess
 
@@ -95,26 +98,38 @@ def train_rotation(selection: str, test: str, backbone: str, epochs: int, tag: s
     return result
 
 
-def _rotations(spec: str) -> list[tuple[str, str]]:
+def _rotations(spec: str, generators: list[str] | None = None) -> list[tuple[str, str]]:
     """'all' -> each generator is the test once, selection = the next generator in the cycle.
 
     'config' -> a single run keeping the base config's own selection/holdout generators.
     """
+    gens = generators or GENERATORS
     if spec == "config":
         return [(None, None)]
     if spec == "all":
-        return [(GENERATORS[(i + 1) % len(GENERATORS)], g) for i, g in enumerate(GENERATORS)]
+        return [(gens[(i + 1) % len(gens)], g) for i, g in enumerate(gens)]
     pairs = [tuple(p.split(":")) for p in spec.split(",")]
     for sel, test in pairs:
-        if sel == test or {sel, test} - set(GENERATORS):
-            raise SystemExit(f"Bad rotation {sel}:{test}; generators are {GENERATORS}")
+        if sel == test or {sel, test} - set(gens):
+            raise SystemExit(f"Bad rotation {sel}:{test}; generators are {gens}")
     return pairs
+
+
+def _config_generators(base_config: str) -> list[str]:
+    """Generator universe for rotations: GenImage-arrow configs use all 8 (incl. SD14)."""
+    import yaml
+
+    cfg = yaml.safe_load((PROJECT / base_config).read_text()) or {}
+    data = cfg.get("data") or {}
+    if data.get("source") == "genimage_arrow":
+        return list(data.get("genimage_generators") or GENIMAGE_GENERATORS)
+    return GENERATORS
 
 
 @app.local_entrypoint()
 def main(rotations: str = "GLIDE:Midjourney", backbone: str = "facebook/dinov2-base", epochs: int = 2,
          tag: str = "", base_config: str = "configs/tiny_genimage_nested.yaml", warm_first: bool = True):
-    pairs = _rotations(rotations)
+    pairs = _rotations(rotations, _config_generators(base_config))
     tag = tag or f"{backbone.split('/')[-1]}_e{epochs}_{time.strftime('%Y%m%d-%H%M%S')}"
     print(f"[modal] {len(pairs)} rotation(s), backbone={backbone}, epochs={epochs}, tag={tag}, "
           f"~${PRICE_PER_S * 3600:.2f}/GPU-hour list")

@@ -446,4 +446,20 @@ def build_base_datasets(cfg: DataConfig, seed: int = 0) -> tuple[Dataset, Datase
         train = CompositeDataset(train_parts) if len(train_parts) > 1 else train_parts[0]
         val = CompositeDataset(val_parts) if len(val_parts) > 1 else val_parts[0]
         return train, val
+    if cfg.source == "genimage_arrow":
+        from dfd.data.external import GENIMAGE_DIRS, GenImageArrowDataset
+
+        if cfg.genimage_train_shards_per_generator < 1:
+            raise ValueError("data.genimage_train_shards_per_generator must be >= 1 "
+                             "(never default to the full ~655 GB)")
+        root = Path(cfg.data_root) / "genimage"
+        all_gens = tuple(cfg.genimage_generators) or tuple(GENIMAGE_DIRS)
+        train_gens = tuple(g for g in all_gens if g not in holdout)
+        train = GenImageArrowDataset(root, "train", train_gens,
+                                     cfg.genimage_train_shards_per_generator,
+                                     align_size=cfg.align_size, max_samples=cfg.max_train_samples, seed=seed)
+        val = GenImageArrowDataset(root, "test", all_gens,
+                                   cfg.genimage_val_shards_per_generator,
+                                   align_size=cfg.align_size, max_samples=cfg.max_val_samples, seed=seed)
+        return train, val
     raise ValueError(f"Unknown data source: {cfg.source}")
