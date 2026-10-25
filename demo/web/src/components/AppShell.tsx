@@ -5,7 +5,7 @@ const LINKS = [
   { to: '/', label: 'Playground' },
   { to: '/instagram', label: 'Spectra Guard' },
   { to: '/reels', label: 'Reels' },
-  { to: '/api', label: 'API' },
+  { to: '/developers', label: 'API' },
 ]
 
 const linkClass = ({ isActive }: { isActive: boolean }) =>

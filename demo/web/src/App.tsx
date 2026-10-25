@@ -25,7 +25,7 @@ export default function App() {
     <BrowserRouter>
       <Routes>
         <Route path="/" element={<Playground />} />
-        <Route path="/api" element={<ApiPage />} />
+        <Route path="/developers" element={<ApiPage />} />
         <Route path="/instagram" element={<Instagram />} />
         <Route path="/reels" element={<Reels />} />
         <Route path="*" element={<Navigate to="/" replace />} />

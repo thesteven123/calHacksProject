@@ -17,6 +17,8 @@ COOKIE_TTL_S = 12 * 3600
 MEDIA_ROOT = Path("/demo/media")
 FEED_ROOT = Path("/demo/feed")
 STATIC = Path("/app/static")
+MAX_IMAGE_BYTES = 15 * 1024 * 1024
+MAX_VIDEO_BYTES = 50 * 1024 * 1024
 
 MODELS_INFO = {
     "specialists": [
@@ -31,6 +33,13 @@ MODELS_INFO = {
          "trained_on": "SFHQ-T2I text-to-image faces (train split)",
          "metrics": {"held_out_flux_auc": 0.988, "fairface_real_fpr": 0.0058},
          "limitations": "Not a face-swap detector: WildDeepfake in-the-wild fakes score at chance."},
+        {"name": "video", "title": "Face-swap video model",
+         "checkpoint": "video_v3",
+         "trained_on": "WildDeepfake + Celeb-DF v2 face-swap clips (temporal adapter)",
+         "metrics": {"wdf_clip_auc": 0.877, "wdf_real_fpr": 0.005, "wdf_fnr": 0.010, "wdf_abstain": 0.754,
+                     "celebdf_clip_auc": 0.845, "celebdf_real_fpr": 0.011, "celebdf_abstain": 0.834},
+         "limitations": "Detects face swaps, NOT talking-head animation (AUC 0.44; 41% of those fakes "
+                        "score real)."},
     ],
     "fusion": "fake if any specialist says fake; real only if all say real; else review",
     "notes": [
@@ -53,17 +62,37 @@ def _session_ok(cookie: str | None) -> bool:
             and hmac.compare_digest(sig, _sign(int(ts))))
 
 
-def _validate_upload(data: bytes, filename: str):
+def _upload_limit(filename: str) -> tuple[str | None, int | None, JSONResponse | None]:
     ext = Path(filename or "").suffix.lower()
     if ext in {".jpg", ".jpeg", ".png", ".webp"}:
-        if len(data) > 15 * 1024 * 1024:
-            return "image", JSONResponse({"error": "image exceeds 15 MB"}, status_code=413)
-        return "image", None
+        return "image", MAX_IMAGE_BYTES, None
     if ext in {".mp4", ".mov", ".webm"}:
-        if len(data) > 50 * 1024 * 1024:
-            return "video", JSONResponse({"error": "video exceeds 50 MB"}, status_code=413)
-        return "video", None
-    return None, JSONResponse({"error": f"unsupported media type {ext!r}"}, status_code=415)
+        return "video", MAX_VIDEO_BYTES, None
+    return None, None, JSONResponse({"error": f"unsupported media type {ext!r}"}, status_code=415)
+
+
+def _validate_upload(data: bytes, filename: str):
+    media_type, limit, error = _upload_limit(filename)
+    if error is not None:
+        return media_type, error
+    assert media_type is not None and limit is not None
+    if len(data) > limit:
+        size_mb = limit // (1024 * 1024)
+        return media_type, JSONResponse({"error": f"{media_type} exceeds {size_mb} MB"}, status_code=413)
+    return media_type, None
+
+
+async def _read_upload(upload, filename: str) -> tuple[bytes, JSONResponse | None]:
+    media_type, limit, error = _upload_limit(filename)
+    if error is not None:
+        return b"", error
+    assert media_type is not None and limit is not None
+    if upload.size is not None and upload.size > limit:
+        size_mb = limit // (1024 * 1024)
+        return b"", JSONResponse({"error": f"{media_type} exceeds {size_mb} MB"}, status_code=413)
+    data = await upload.read(limit + 1)
+    _, error = _validate_upload(data, filename)
+    return (b"", error) if error is not None else (data, None)
 
 
 def _detect_call(data: bytes, filename: str, detector_cls):
@@ -104,7 +133,11 @@ def build_api(detector_cls) -> FastAPI:
         f = form.get("file")
         if f is None:
             return JSONResponse({"error": "multipart field 'file' required"}, status_code=400)
-        return _detect_call(await f.read(), f.filename or "", detector_cls)
+        filename = f.filename or ""
+        data, err = await _read_upload(f, filename)
+        if err is not None:
+            return err
+        return _detect_call(data, filename, detector_cls)
 
     return app
 
@@ -143,7 +176,11 @@ def build_web(detector_cls, api_fn=None) -> FastAPI:
         f = form.get("file")
         if f is None:
             return JSONResponse({"error": "multipart field 'file' required"}, status_code=400)
-        return _detect_call(await f.read(), f.filename or "", detector_cls)
+        filename = f.filename or ""
+        data, err = await _read_upload(f, filename)
+        if err is not None:
+            return err
+        return _detect_call(data, filename, detector_cls)
 
     @app.get("/api/models")
     def api_models(request: Request):
@@ -172,7 +209,7 @@ def build_web(detector_cls, api_fn=None) -> FastAPI:
         if (err := need_auth(request)) is not None:
             return err
         target = (MEDIA_ROOT / path).resolve()
-        if not str(target).startswith(str(MEDIA_ROOT.resolve())) or not target.is_file():
+        if not target.is_relative_to(MEDIA_ROOT.resolve()) or not target.is_file():
             return JSONResponse({"error": "not found"}, status_code=404)
         return FileResponse(target)
 

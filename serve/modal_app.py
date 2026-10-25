@@ -53,6 +53,7 @@ hf_cache = modal.Volume.from_name("dfd-hf-cache", create_if_missing=True)
 GENERAL_CANDIDATES = ["/runs/general_all/config/best.pt",
                       "/runs/full7_dinov2_conformal/SD15-to-Midjourney/best.pt"]
 FACE_CKPT = "/runs/face_t2i_b3/config/best.pt"
+VIDEO_CKPT = "/runs/video_v3/config/best.pt"
 
 
 def _hf_secret() -> list:
@@ -79,7 +80,7 @@ class Detector:
     @modal.enter()
     def load(self):
         from dfd.inference.pipeline import DetectionPipeline
-        from dfd.inference.router import FaceDetector, MultiDetector
+        from dfd.inference.router import FaceDetector, MultiDetector, VideoClipScorer
 
         general_ckpt = next((p for p in GENERAL_CANDIDATES if Path(p).exists()), None)
         if general_ckpt is None:
@@ -87,9 +88,13 @@ class Detector:
         general = DetectionPipeline(general_ckpt, None, "auto", crop_mode="center")
         face = DetectionPipeline(FACE_CKPT, None, "auto", crop_mode="center") \
             if Path(FACE_CKPT).exists() else None
+        video = VideoClipScorer(VIDEO_CKPT, "auto", face_onnx="/opt/yunet.onnx") \
+            if Path(VIDEO_CKPT).exists() else None
         versions = {"general": Path(general_ckpt).parents[1].name,
-                    "face": Path(FACE_CKPT).parents[1].name if face else None}
-        self.md = MultiDetector(general, face, FaceDetector("/opt/yunet.onnx"), versions)
+                    "face": Path(FACE_CKPT).parents[1].name if face else None,
+                    "video": Path(VIDEO_CKPT).parents[1].name if video else None}
+        self.md = MultiDetector(general, face, FaceDetector("/opt/yunet.onnx"), versions,
+                                video_scorer=video)
 
     @modal.method()
     def detect(self, data: bytes, filename: str) -> dict:
