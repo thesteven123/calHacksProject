@@ -47,6 +47,8 @@ class OODGate:
 def fit_ood_gate(mu_reals: np.ndarray, alpha: float = 0.05, seed: int = 0) -> OODGate:
     """Random half (seeded) fits mean + LedoitWolf covariance; the other half sets gamma =
     sorted(d_cal)[ceil((n_cal+1)*(1-alpha)) - 1], or inf if that index exceeds n_cal."""
+    if not (math.isfinite(alpha) and 0.0 < alpha < 1.0):
+        raise ValueError(f"OOD gate alpha must be finite and strictly between 0 and 1, got {alpha!r}")
     mu = np.asarray(mu_reals, dtype=np.float64)
     if len(mu) < MIN_REALS:
         raise ValueError(f"OOD gate needs >= {MIN_REALS} reals, got {len(mu)}")
