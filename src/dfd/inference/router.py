@@ -19,6 +19,91 @@ from PIL import Image
 from dfd.inference.pipeline import DetectionPipeline
 from dfd.inference.video import sample_keyframes
 
+
+class _ListClipDataset:
+    """1-item clip dataset: base[idx] returns (list_of_PIL_frames, 1, 'video') for TransformedDataset._clip."""
+
+    def __init__(self, frames):
+        self.frames = frames
+
+    def __len__(self):
+        return 1
+
+    def meta(self, idx):
+        return 1, "video"
+
+    def __getitem__(self, idx):
+        return self.frames, 1, "video"
+
+
+class VideoClipScorer:
+    """Face-swap video specialist (temporal model, WildDeepfake-trained, e.g. video_v2b_r2).
+
+    Scores a whole clip through the SAME preprocessing as training/eval: YuNet 1.3x face crops
+    -> encode_aligned -> pick_clip_frames + DetectorTransform(train=False) via a 1-item
+    TransformedDataset. Returns None when fewer than half the sampled frames have a face
+    (the model only knows face crops).
+    """
+
+    def __init__(self, checkpoint: str | Path, device: str = "auto", n_frames: int = 8,
+                 face_onnx: str | Path | None = "/opt/yunet.onnx"):
+        import torch
+
+        from dfd.config import Config
+        from dfd.data.datasets import TransformedDataset
+        from dfd.data.transforms import DetectorTransform
+        from dfd.eval.calibration import Calibration
+        from dfd.models.detector import DeepfakeDetector
+        from dfd.training.trainer import resolve_device
+
+        self.device = resolve_device(device)
+        self.model, _ = DeepfakeDetector.load(checkpoint, map_location="cpu")
+        self.model.to(self.device).eval()
+        self.n_frames = n_frames
+        self.face_onnx = face_onnx
+        cal_path = Path(checkpoint).with_name("calibration.json")
+        if cal_path.exists():
+            self.cal = Calibration.load(cal_path)
+            self.calibration_status = "matched" if self.cal.crop_mode == "center" else "mismatched"
+        else:
+            self.cal, self.calibration_status = Calibration(), "missing"
+        cfg_yaml = Path(checkpoint).with_name("config.yaml")
+        from dfd.config import PTEConfig
+        pte = Config.from_yaml(cfg_yaml).data.pte if cfg_yaml.exists() else PTEConfig(enabled=False)
+        self._transform = DetectorTransform(pte, self.model.cfg.image_size, train=False)
+        self._dataset_cls = TransformedDataset
+        self._torch = torch
+
+    def _tensor(self, frames):
+        # Reuse TransformedDataset._clip (pick_clip_frames + per-frame DetectorTransform) on a
+        # 1-item stub dataset so preprocessing is identical to evaluation. Built per call: the
+        # Modal class serves concurrent inputs on threads, so no per-request state is shared.
+        item = self._dataset_cls(_ListClipDataset(frames), self._transform, seed=0,
+                                 frames_per_clip=self.n_frames)[0]
+        return item["pixels"].unsqueeze(0).to(self.device), item["mask"].unsqueeze(0).to(self.device)
+
+    def score(self, path: str | Path) -> dict | None:
+        import io
+
+        from dfd.data.video_frames import extract_clip_frames, probe_video, video_timestamps
+
+        info = probe_video(path)
+        stats: dict = {}
+        jpgs = extract_clip_frames(path, video_timestamps(info["duration_s"], 4.0, 16), 256, 95,
+                                   fps=info["fps"], face_onnx=self.face_onnx, stats=stats)
+        if stats.get("face_fallback", 0) > len(jpgs) / 2:
+            return None
+        frames = [Image.open(io.BytesIO(b)).convert("RGB") for b in jpgs]
+        pixels, mask = self._tensor(frames)
+        with self._torch.no_grad():
+            out = self.model(pixels, mask)
+        p = float(self.cal.prob(out["logit"].item()))
+        verdict = "review" if self.cal.verdict(p) == "abstain" or self.calibration_status != "matched" \
+            else self.cal.verdict(p)
+        return {"name": "video", "title": "Face-swap video model",
+                "applies_to": "whole clip (face track)", "p_fake": round(p, 4),
+                "verdict": verdict, "calibration_status": self.calibration_status}
+
 FLAG_LABEL = {
     "fake": ("ai_generated", "Likely AI-generated or manipulated"),
     "review": ("needs_review", "Unverified - needs human review"),
@@ -56,9 +141,11 @@ class FaceDetector:
 
 class MultiDetector:
     def __init__(self, general: DetectionPipeline, face: DetectionPipeline | None,
-                 face_detector: FaceDetector | None, versions: dict | None = None):
+                 face_detector: FaceDetector | None, versions: dict | None = None,
+                 video_scorer=None):
         self.general, self.face, self.face_detector = general, face, face_detector
         self.versions = versions or {}
+        self.video_scorer = video_scorer
 
     def _specialist(self, pipe, name, title, applies_to, res, box=None) -> dict:
         verdict = "review" if res.verdict == "abstain" else res.verdict
@@ -149,10 +236,12 @@ class MultiDetector:
         for t, r in zip(times, per_frame):
             frame_rows.append({"t": round(float(t), 2), "verdict": r["verdict"],
                                "p_fake": max(s["p_fake"] or 0.0 for s in r["specialists"])})
+        # Face-swap video specialist on the whole clip (None = no face track found / no scorer).
+        vrow = self.video_scorer.score(path) if self.video_scorer else None
         n_fake = sum(1 for f in frame_rows if f["verdict"] == "fake")
-        if n_fake >= 2:
+        if (vrow and vrow["verdict"] == "fake") or n_fake >= 2:
             verdict = "fake"
-        elif all(f["verdict"] == "real" for f in frame_rows):
+        elif vrow and vrow["verdict"] == "real" and all(f["verdict"] == "real" for f in frame_rows):
             verdict = "real"
         else:
             verdict = "review"
@@ -177,9 +266,17 @@ class MultiDetector:
         faces = per_frame[top]["faces"]
         reasons = [f"{f['verdict']} ({f['p_fake']:.2f}) @ {f['t']}s" for f in frame_rows]
         reasons = ["Per-keyframe verdicts: " + "; ".join(reasons),
-                   "Video verdict is a frame-level heuristic (not clip-calibrated)."]
+                   "The video model is trained on face swaps (WildDeepfake); it does not cover "
+                   "talking-head animation."]
+        if self.video_scorer is None or vrow is None:
+            reasons += ["Video verdict is a frame-level heuristic (not clip-calibrated).",
+                        "No face track found; the face-swap video model was not applied."]
+            method, calibrated = "keyframe_heuristic", False
+        else:
+            specialists.append(vrow)
+            method, calibrated = "clip_model+keyframes", True
         flag, label = FLAG_LABEL[verdict]
-        p_max = max(f["p_fake"] for f in frame_rows)
+        p_max = max([f["p_fake"] for f in frame_rows] + ([vrow["p_fake"]] if vrow else []))
         confidence = p_max if verdict == "fake" else (1.0 - p_max if verdict == "real" else p_max)
         return {
             "id": str(uuid.uuid4()),
@@ -190,11 +287,12 @@ class MultiDetector:
             "confidence": round(float(confidence), 4),
             "specialists": specialists,
             "faces": faces,
-            "video": {"method": "keyframe_heuristic", "calibrated": False,
+            "video": {"method": method, "calibrated": calibrated,
                       "n_keyframes": len(frame_rows), "frames": frame_rows},
             "reasons": reasons,
             "latency_ms": int(round((time.time() - t0) * 1000)),
             "model_versions": {"general": self.versions.get("general"),
-                               "face": self.versions.get("face") if self.face else None},
+                               "face": self.versions.get("face") if self.face else None,
+                               "video": self.versions.get("video") if self.video_scorer else None},
             "disclaimer": DISCLAIMER,
         }

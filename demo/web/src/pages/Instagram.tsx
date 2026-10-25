@@ -144,7 +144,7 @@ function PersonaProfile({ handle, posts, onExplain, onBack }: { handle: string; 
         </p>
         <p className="text-[13px] text-[#8e8e8e]">{mine[0]?.caption ?? 'Demo account'}</p>
         <p className="mt-1 text-[12px] text-[#8e8e8e]">
-          {flagged} of {total} posts flagged by the detector
+          {flagged} of {total} posts with a fake verdict
         </p>
       </div>
       <div className="flex gap-2">
@@ -159,7 +159,7 @@ function PersonaProfile({ handle, posts, onExplain, onBack }: { handle: string; 
         {mine.map((p) => (
           <button key={p.id} type="button" onClick={() => onExplain(p.detection)} className="relative aspect-square focus:outline-none focus-visible:ring-2 focus-visible:ring-[#0095F6]" aria-label={`Post: ${p.caption}`}>
             <img src={p.media} alt="" className="h-full w-full object-cover" />
-            {badgeFor(p.detection) && <span className="absolute right-1 top-1 text-[#0095F6] drop-shadow" aria-hidden="true">✨</span>}
+            {p.detection.verdict === 'fake' && <span className="absolute right-1 top-1 text-[#0095F6] drop-shadow" aria-hidden="true">✨</span>}
           </button>
         ))}
       </div>
@@ -250,6 +250,7 @@ export function Instagram() {
       setItems([{ id, pending: true, media: url, media_type: mediaType, caption }])
       const detection = await run(file)
       setItems([])
+      if (!detection) URL.revokeObjectURL(url)
       if (detection) {
         setPosts((p) => [{ id, handle: YOU.handle, avatar: YOU.avatar, caption, media: url, media_type: mediaType, likes: 0, comments: 0, ground_truth: null, source: YOU.source, detection }, ...p])
         setTab('home')

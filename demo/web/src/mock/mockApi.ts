@@ -7,7 +7,6 @@ const VIDEO_TYPES = ['video/mp4', 'video/quicktime', 'video/webm']
 const DETECT_DELAY_MS = 800
 
 const hasSession = () => sessionStorage.getItem(SESSION_KEY) === '1'
-const json = (body: unknown) => new Response(JSON.stringify(body), { headers: { 'Content-Type': 'application/json' } })
 function fail(status: number, error: string): never {
   throw new ApiError(status, error)
 }
@@ -54,17 +53,17 @@ export async function mockApi<T>(path: string, init?: RequestInit): Promise<T> {
     const body = JSON.parse(String(init?.body ?? '{}')) as { passcode?: string }
     if (body.passcode !== 'demo') fail(401, 'wrong passcode')
     sessionStorage.setItem(SESSION_KEY, '1')
-    return json({ ok: true }) as unknown as T
+    return { ok: true } as T
   }
   if (route === '/api/session') {
     if (!hasSession()) fail(401, 'not signed in')
-    return json({ ok: true }) as unknown as T
+    return { ok: true } as T
   }
   if (!hasSession()) fail(401, 'not signed in')
 
-  if (route === '/api/feed/instagram') return json({ posts: IG_POSTS }) as unknown as T
-  if (route === '/api/feed/tiktok') return json({ posts: TT_POSTS }) as unknown as T
-  if (route === '/api/models') return json(MODELS) as unknown as T
+  if (route === '/api/feed/instagram') return { posts: IG_POSTS } as T
+  if (route === '/api/feed/tiktok') return { posts: TT_POSTS } as T
+  if (route === '/api/models') return MODELS as T
   if (route === '/api/detect' && method === 'POST') return (await mockDetect(init?.body as FormData)) as T
   fail(404, `no mock route for ${method} ${route}`)
   throw new Error('unreachable')
