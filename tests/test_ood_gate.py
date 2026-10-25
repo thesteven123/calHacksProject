@@ -73,7 +73,7 @@ def test_invalid_alpha_raises(alpha):
         fit_ood_gate(np.random.default_rng(0).normal(size=(40, 4)), alpha)
 
 
-@pytest.mark.parametrize("alphas", ["0", "1", "-0.1", "0.05,2", "nan", ","])
+@pytest.mark.parametrize("alphas", ["0", "1", "-0.1", "0.05,2", "nan", ",", "", "0.05,nope", "0.05,,0.10", "0.05,"])
 def test_cli_rejects_invalid_alphas(alphas, tmp_path):
     with pytest.raises(SystemExit):
         _script().main(["--checkpoint", str(tmp_path / "best.pt"), "--alphas", alphas, "--skip-external"])
